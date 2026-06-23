@@ -1,67 +1,65 @@
-# Device Alarm Demo
+# Device Alarm API
 
-Bu proje sade bir Spring Boot REST API ornegidir. Ana akis:
+Spring Boot ile gelistirilmis sade bir cihaz ve alarm yonetimi REST API'si.
 
-```text
-Controller -> Service -> Repository -> Entity -> Database
-```
-
-## Kalan Paketler
+Proje su temel akisi gostermek icin hazirlandi:
 
 ```text
-controller  HTTP endpointleri
-dto         Request ve response modelleri
-entity      Veritabani tablo modelleri
-repository  Veritabani erisim katmani
-service     Is kurallari
+Controller -> DTO -> Service -> Repository -> Entity -> PostgreSQL
 ```
 
-## Endpointler
+## Ozellikler
+
+- Kullanici olusturma
+- Cihaz ekleme, listeleme, guncelleme ve silme
+- Kullaniciyi cihaza yetkilendirme
+- Kullaniciya ait cihazlari listeleme
+- Cihaz icin alarm olusturma
+- Cihaza ait alarmlari listeleme
+- PostgreSQL ve Docker Compose ile calisma
+
+## Teknolojiler
 
 ```text
-POST   /api/users
-GET    /api/users
-GET    /api/users/{id}
-POST   /api/users/{userId}/devices
-GET    /api/users/{userId}/devices
-DELETE /api/users/{userId}/devices/{deviceId}
-
-POST   /api/devices
-GET    /api/devices
-GET    /api/devices/{id}
-PUT    /api/devices/{id}
-DELETE /api/devices/{id}
-
-POST   /api/alarms
-GET    /api/alarms/{id}
-GET    /api/devices/{deviceId}/alarms
+Java 25
+Spring Boot 4.1
+Spring Web MVC
+Spring Data JPA
+PostgreSQL
+Docker Compose
+Maven Wrapper
 ```
 
-## Ornek Device Request
+## Calistirma
 
-```json
-{
-  "name": "Kamera 1",
-  "deviceType": "CAMERA",
-  "location": "Depo"
-}
+Projeyi Docker ile baslat:
+
+```powershell
+docker compose up -d --build
 ```
 
-## Ornek User Request
+API adresi:
 
-```json
-{
-  "username": "selin",
-  "email": "selin@example.com"
-}
+```text
+http://localhost:8080
 ```
 
-## Ornek User Device Assign Request
+Projeyi durdur:
 
-```json
-{
-  "deviceId": 1
-}
+```powershell
+docker compose down
+```
+
+Database verisini de silerek sifirlamak icin:
+
+```powershell
+docker compose down -v
+```
+
+## Test
+
+```powershell
+.\mvnw.cmd test
 ```
 
 ## pgAdmin Baglantisi
@@ -74,13 +72,96 @@ Username: postgres
 Password: postgres
 ```
 
-## Ornek Alarm Request
+Tablolar:
 
-```json
-{
-  "deviceId": 1,
-  "alarmType": "MOTION",
-  "severity": "HIGH",
-  "description": "Hareket algilandi"
-}
+```text
+users
+devices
+user_devices
+alarms
+```
+
+## Temel API Akisi
+
+1. Kullanici olustur.
+2. Cihaz olustur.
+3. Cihazi kullaniciya ata.
+4. Cihaz icin alarm olustur.
+5. Kullaniciya ait cihazlari veya cihaza ait alarmlari sorgula.
+
+## Endpointler
+
+### Users
+
+```text
+POST   /api/users
+GET    /api/users
+GET    /api/users/{id}
+POST   /api/users/{userId}/devices
+GET    /api/users/{userId}/devices
+DELETE /api/users/{userId}/devices/{deviceId}
+```
+
+### Devices
+
+```text
+POST   /api/devices
+GET    /api/devices
+GET    /api/devices/{id}
+PUT    /api/devices/{id}
+DELETE /api/devices/{id}
+```
+
+### Alarms
+
+```text
+POST   /api/alarms
+GET    /api/alarms/{id}
+GET    /api/devices/{deviceId}/alarms
+```
+
+## Ornek Requestler
+
+Kullanici olustur:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/users `
+  -ContentType "application/json" `
+  -Body '{"username":"selin","email":"selin@example.com"}'
+```
+
+Cihaz olustur:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/devices `
+  -ContentType "application/json" `
+  -Body '{"name":"Kamera 1","deviceType":"CAMERA","location":"Depo"}'
+```
+
+Cihazi kullaniciya ata:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/users/1/devices `
+  -ContentType "application/json" `
+  -Body '{"deviceId":1}'
+```
+
+Alarm olustur:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/alarms `
+  -ContentType "application/json" `
+  -Body '{"deviceId":1,"alarmType":"MOTION","severity":"HIGH","description":"Hareket algilandi"}'
+```
+
+Kullanicinin cihazlarini listele:
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/users/1/devices
+```
+
+Cihazin alarmlarini listele:
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/devices/1/alarms
 ```
