@@ -16,6 +16,7 @@ Controller -> DTO -> Service -> Repository -> Entity -> PostgreSQL
 - Kullaniciya ait cihazlari listeleme
 - Cihaz icin alarm olusturma
 - Cihaza ait alarmlari listeleme
+- Gemini API destekli chatbot ile cihaz ve alarm verilerini sorgulama
 - PostgreSQL ve Docker Compose ile calisma
 
 ## Teknolojiler
@@ -26,16 +27,17 @@ Spring Boot 4.1
 Spring Web MVC
 Spring Data JPA
 PostgreSQL
+Swagger/OpenAPI
 Docker Compose
 Maven Wrapper
 ```
 
 ## Calistirma
 
-Projeyi Docker ile baslat:
+Gelistirme icin sadece PostgreSQL'i Docker ile baslat:
 
 ```powershell
-docker compose up -d --build
+docker compose up -d postgres
 ```
 
 API adresi:
@@ -44,10 +46,22 @@ API adresi:
 http://localhost:8080
 ```
 
+Spring Boot uygulamasini IntelliJ'den veya Maven ile lokal calistir:
+
+```powershell
+.\mvnw.cmd spring-boot:run
+```
+
 Projeyi durdur:
 
 ```powershell
 docker compose down
+```
+
+API'yi de Docker icinde calistirmak istersen:
+
+```powershell
+docker compose --profile app up -d --build
 ```
 
 Database verisini de silerek sifirlamak icin:
@@ -120,6 +134,26 @@ GET    /api/alarms/{id}
 GET    /api/devices/{deviceId}/alarms
 ```
 
+### Swagger
+
+Uygulama calisirken Swagger UI adresi:
+
+```text
+http://localhost:8080/swagger-ui.html
+```
+
+OpenAPI JSON adresi:
+
+```text
+http://localhost:8080/v3/api-docs
+```
+
+### Chat
+
+```text
+POST /api/chat
+```
+
 ## Ornek Requestler
 
 Kullanici olustur:
@@ -166,82 +200,48 @@ Cihazin alarmlarini listele:
 Invoke-RestMethod http://localhost:8080/api/devices/1/alarms
 ```
 
-## Gelecek Calismalar
+## Gemini API
 
-Bu proje final hedefindeki production-ready AI chatbot sisteminin temel API katmanidir.
-Sonraki adimlarda asagidaki ozellikler eklenecektir:
+Gemini API key kod icine yazilmaz. Uygulamayi baslatmadan once ortam degiskeni olarak ver:
 
-### Chat ve Natural Language Sorgulama
+Windows PowerShell:
 
-- `POST /api/chat` endpointi eklenecek.
-- Kullanici mesajlari natural language olarak alinacak.
-- Ornek soru desteklenecek:
-
-```text
-Merhaba benim icin dun gerceklesen alarmlari bul
+```powershell
+$env:GEMINI_API_KEY="BURAYA_KEY"
 ```
 
-- Sistem kullanicinin yetkili oldugu cihazlari bulacak.
-- Bu cihazlarda dun olusan alarmlari sorgulayacak.
-- Emin oldugu cevaplarda net sonuc donecek.
-- Emin olamadigi veya veri bulamadigi durumlarda bunu acikca belirtecek.
+Linux/Mac:
 
-Ornek hedef cevap:
-
-```text
-Dun yetkili oldugunuz cihazlarda 2 adet ariza gerceklesti:
-1. Jenerator arizasi, alarm id: 1
-2. UPS arizasi, alarm id: 2
+```bash
+export GEMINI_API_KEY="BURAYA_KEY"
 ```
 
-### Conversation History
+Gercek API key'i koda yazma. Lokal secret dosyalari icin `.env` ve `.env.*` dosyalari `.gitignore` icindedir.
 
-- `conversations` tablosu eklenecek.
-- `messages` tablosu eklenecek.
-- Kullanici ve asistan mesajlari veritabaninda tutulacak.
-- Multi-turn conversation destegi eklenecek.
-- Onceki mesajlara gore context-aware cevap uretilecek.
+Yeni dogal dil endpoint'i:
 
-### AI Agent Layer
+```text
+POST /api/chat
+```
 
-- Controller ve Service katmanlarindan ayri bir AI Agent Layer kurulacak.
-- Intent detection eklenecek.
-- Alarm sorgulama, cihaz listeleme gibi gorevler agent tarafindan yonlendirilecek.
-- Opsiyonel olarak cihaz ekleme gibi agent task'lari desteklenecek.
+Ornek body:
 
-### Guvenlik ve Veri Maskeleme
+```json
+{
+  "message": "Aktif cihazlari getir"
+}
+```
 
-- Modele gonderilecek kurumsal veriler icin maskeleme katmani eklenecek.
-- Hassas alanlar modele gonderilmeden once temizlenecek veya maskelenecek.
-- Guvenlik riski tasiyan sorular tespit edilecek.
-- Riskli durumlarda yoneticiye bilgilendirme maili gonderilecek.
+Gemini SQL uretmez ve veritabanina erisemez. Sadece `action + operation + filters` JSON'u dondurur; yetki, limit ve veritabani islemleri backend servislerinde uygulanir.
 
-### RabbitMQ ve Event-Driven Communication
+Chatbot yazma komutlarini dogrudan uygulamaz. Once backend icinde pending komut olusturur ve kullanicidan onay ister:
 
-- RabbitMQ eklenecek.
-- Alarm olusumu, chat mesaji ve simulator olaylari event olarak yayinlanacak.
-- Asenkron mesaj isleme destegi eklenecek.
-- Cihaz simulator servisi RabbitMQ uzerinden alarm/event uretecek.
+```text
+Depo Kamerasi cihazini pasif yap
+```
 
-### Rate Limiting ve Caching
+```text
+#4 Depo Kamerasi cihazinin durumunu PASSIVE yapayim mi? Onay icin evet, iptal icin hayir yaz.
+```
 
-- Chat ve API endpointleri icin rate limiting eklenecek.
-- Sik sorgulanan veriler icin cache mekanizmasi eklenecek.
-- Gereksiz veritabani sorgulari azaltilecek.
-
-### API Documentation
-
-- Swagger/OpenAPI dokumantasyonu eklenecek.
-- Endpointler Swagger UI uzerinden test edilebilir hale getirilecek.
-
-### Testler
-
-- Service katmani icin unit testler eklenecek.
-- Controller katmani icin API testleri eklenecek.
-- Repository sorgulari icin integration testler eklenecek.
-
-### Deployment
-
-- Kubernetes deployment dosyalari eklenecek.
-- PostgreSQL, uygulama ve RabbitMQ icin manifestler hazirlanacak.
-- Proje tak-calistir sekilde calisacak hale getirilecek.
+Kullanici `evet` derse backend servisleri calisir; `hayir` derse islem iptal edilir. Yazma komutlari admin yetkisi gerektirir.

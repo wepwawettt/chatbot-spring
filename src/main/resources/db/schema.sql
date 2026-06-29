@@ -9,6 +9,9 @@ CREATE TABLE users (
     -- Email unique olmali; iki kullanici ayni email'i alamaz.
     email VARCHAR(255) NOT NULL UNIQUE,
 
+    -- Kullanici sifresinin BCrypt hash degeri.
+    password_hash VARCHAR(255),
+
     -- Kullanici rolu. Deger verilmezse USER olur.
     role VARCHAR(50) NOT NULL DEFAULT 'USER',
 
@@ -114,3 +117,103 @@ CREATE INDEX idx_alarms_device_id ON alarms (device_id);
 
 -- Alarm zamanina gore siralama/filtreleme yapmayi hizlandirir.
 CREATE INDEX idx_alarms_occurred_at ON alarms (occurred_at);
+
+-- Demo verileri. Kullanici sifresi tum demo kullanicilar icin: user123
+INSERT INTO users (username, email, password_hash, role, enabled, created_at, updated_at)
+VALUES
+    ('selin', 'selin@example.com', '$2a$10$AFAIR9FFIfrGe9TnglPCP.y14oSo7D/JlhwGPx9Y1GhQ3y.gU7cz.', 'USER', TRUE, NOW(), NOW()),
+    ('burak', 'burak@example.com', '$2a$10$AFAIR9FFIfrGe9TnglPCP.y14oSo7D/JlhwGPx9Y1GhQ3y.gU7cz.', 'USER', TRUE, NOW(), NOW()),
+    ('zeynep.admin', 'zeynep.admin@example.com', '$2a$10$AFAIR9FFIfrGe9TnglPCP.y14oSo7D/JlhwGPx9Y1GhQ3y.gU7cz.', 'ADMIN', TRUE, NOW(), NOW())
+ON CONFLICT (username) DO NOTHING;
+
+INSERT INTO devices (name, device_type, status, location, created_at, updated_at)
+SELECT 'Depo Kamerasi', 'CAMERA', 'ACTIVE', 'Depo Girisi', NOW(), NOW()
+WHERE NOT EXISTS (SELECT 1 FROM devices WHERE name = 'Depo Kamerasi');
+
+INSERT INTO devices (name, device_type, status, location, created_at, updated_at)
+SELECT 'Sicaklik Sensoru', 'SENSOR', 'ACTIVE', 'Uretim Hatti', NOW(), NOW()
+WHERE NOT EXISTS (SELECT 1 FROM devices WHERE name = 'Sicaklik Sensoru');
+
+INSERT INTO devices (name, device_type, status, location, created_at, updated_at)
+SELECT 'Ana Gateway', 'GATEWAY', 'ACTIVE', 'Sunucu Odasi', NOW(), NOW()
+WHERE NOT EXISTS (SELECT 1 FROM devices WHERE name = 'Ana Gateway');
+
+INSERT INTO devices (name, device_type, status, location, created_at, updated_at)
+SELECT 'Kapi Sensoru', 'SENSOR', 'MAINTENANCE', 'Arka Kapi', NOW(), NOW()
+WHERE NOT EXISTS (SELECT 1 FROM devices WHERE name = 'Kapi Sensoru');
+
+INSERT INTO devices (name, device_type, status, location, created_at, updated_at)
+SELECT 'Yangin Sensoru', 'SENSOR', 'PASSIVE', 'Ofis Kat 2', NOW(), NOW()
+WHERE NOT EXISTS (SELECT 1 FROM devices WHERE name = 'Yangin Sensoru');
+
+INSERT INTO devices (name, device_type, status, location, created_at, updated_at)
+SELECT 'Jenerator', 'GENERATOR', 'ACTIVE', 'Enerji Odasi', NOW(), NOW()
+WHERE NOT EXISTS (SELECT 1 FROM devices WHERE name = 'Jenerator');
+
+INSERT INTO devices (name, device_type, status, location, created_at, updated_at)
+SELECT 'UPS', 'UPS', 'ACTIVE', 'Sunucu Odasi', NOW(), NOW()
+WHERE NOT EXISTS (SELECT 1 FROM devices WHERE name = 'UPS');
+
+INSERT INTO user_devices (user_id, device_id)
+SELECT u.id, d.id
+FROM users u
+JOIN devices d ON d.name IN ('Depo Kamerasi', 'Sicaklik Sensoru', 'Ana Gateway')
+WHERE u.username = 'selin'
+ON CONFLICT (user_id, device_id) DO NOTHING;
+
+INSERT INTO user_devices (user_id, device_id)
+SELECT u.id, d.id
+FROM users u
+JOIN devices d ON d.name IN ('Kapi Sensoru', 'Yangin Sensoru')
+WHERE u.username = 'burak'
+ON CONFLICT (user_id, device_id) DO NOTHING;
+
+INSERT INTO user_devices (user_id, device_id)
+SELECT u.id, d.id
+FROM users u
+JOIN devices d ON d.name IN ('Depo Kamerasi', 'Ana Gateway', 'Yangin Sensoru')
+WHERE u.username = 'zeynep.admin'
+ON CONFLICT (user_id, device_id) DO NOTHING;
+
+INSERT INTO user_devices (user_id, device_id)
+SELECT u.id, d.id
+FROM users u
+JOIN devices d ON d.name IN ('Jenerator', 'UPS')
+WHERE u.username IN ('selin', 'zeynep.admin')
+ON CONFLICT (user_id, device_id) DO NOTHING;
+
+INSERT INTO alarms (device_id, alarm_type, severity, description, occurred_at, created_at)
+SELECT d.id, 'MOTION', 'HIGH', 'Depo girisinde hareket algilandi', NOW() - INTERVAL '2 hours', NOW()
+FROM devices d
+WHERE d.name = 'Depo Kamerasi'
+  AND NOT EXISTS (SELECT 1 FROM alarms WHERE description = 'Depo girisinde hareket algilandi');
+
+INSERT INTO alarms (device_id, alarm_type, severity, description, occurred_at, created_at)
+SELECT d.id, 'TEMPERATURE', 'MEDIUM', 'Uretim hattinda sicaklik esik degerine yaklasti', NOW() - INTERVAL '45 minutes', NOW()
+FROM devices d
+WHERE d.name = 'Sicaklik Sensoru'
+  AND NOT EXISTS (SELECT 1 FROM alarms WHERE description = 'Uretim hattinda sicaklik esik degerine yaklasti');
+
+INSERT INTO alarms (device_id, alarm_type, severity, description, occurred_at, created_at)
+SELECT d.id, 'CONNECTION', 'LOW', 'Ana gateway kisa sureli baglanti gecikmesi yasadi', NOW() - INTERVAL '20 minutes', NOW()
+FROM devices d
+WHERE d.name = 'Ana Gateway'
+  AND NOT EXISTS (SELECT 1 FROM alarms WHERE description = 'Ana gateway kisa sureli baglanti gecikmesi yasadi');
+
+INSERT INTO alarms (device_id, alarm_type, severity, description, occurred_at, created_at)
+SELECT d.id, 'CONNECTION', 'HIGH', 'Kapi sensoru bakim modunda sinyal uretmiyor', NOW() - INTERVAL '10 minutes', NOW()
+FROM devices d
+WHERE d.name = 'Kapi Sensoru'
+  AND NOT EXISTS (SELECT 1 FROM alarms WHERE description = 'Kapi sensoru bakim modunda sinyal uretmiyor');
+
+INSERT INTO alarms (device_id, alarm_type, severity, description, occurred_at, created_at)
+SELECT d.id, 'FAILURE', 'HIGH', 'Jenerator arizasi', NOW() - INTERVAL '1 day' + INTERVAL '2 hours', NOW()
+FROM devices d
+WHERE d.name = 'Jenerator'
+  AND NOT EXISTS (SELECT 1 FROM alarms WHERE description = 'Jenerator arizasi');
+
+INSERT INTO alarms (device_id, alarm_type, severity, description, occurred_at, created_at)
+SELECT d.id, 'FAILURE', 'HIGH', 'UPS arizasi', NOW() - INTERVAL '1 day' + INTERVAL '4 hours', NOW()
+FROM devices d
+WHERE d.name = 'UPS'
+  AND NOT EXISTS (SELECT 1 FROM alarms WHERE description = 'UPS arizasi');

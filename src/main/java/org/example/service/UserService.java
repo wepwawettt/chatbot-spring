@@ -4,11 +4,11 @@ import jakarta.persistence.EntityExistsException;
 import jakarta.persistence.EntityNotFoundException;
 import org.example.dto.UserCreateRequest;
 import org.example.dto.UserResponse;
+import org.example.entity.Device;
 import org.example.entity.User;
-import org.example.entity.UserDevice;
 import org.example.repository.DeviceRepository;
-import org.example.repository.UserDeviceRepository;
 import org.example.repository.UserRepository;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -18,16 +18,18 @@ import java.util.List;
 @Service
 public class UserService {
     private static final String DEFAULT_ROLE = "USER";
+    private static final List<String> ALLOWED_ROLES = List.of("USER", "ADMIN");
 
     private final UserRepository userRepository;
     private final DeviceRepository deviceRepository;
-    private final UserDeviceRepository userDeviceRepository;
+    private final PasswordEncoder passwordEncoder;
 
-    public UserService(UserRepository userRepository, DeviceRepository deviceRepository,
-                       UserDeviceRepository userDeviceRepository) {
+    public UserService(UserRepository userRepository,
+                       DeviceRepository deviceRepository,
+                       PasswordEncoder passwordEncoder) {
         this.userRepository = userRepository;
         this.deviceRepository = deviceRepository;
-        this.userDeviceRepository = userDeviceRepository;
+        this.passwordEncoder = passwordEncoder;
     }
 
     @Transactional
@@ -39,7 +41,8 @@ public class UserService {
         User user = new User();
         user.setUsername(request.getUsername());
         user.setEmail(request.getEmail());
-        user.setRole(isBlank(request.getRole()) ? DEFAULT_ROLE : request.getRole());
+        user.setPasswordHash(passwordEncoder.encode(request.getPassword()));
+        user.setRole(normalizeRole(request.getRole()));
         user.setEnabled(true);
         user.setCreatedAt(now);
         user.setUpdatedAt(now);
@@ -61,36 +64,52 @@ public class UserService {
     }
 
     @Transactional
-    public void assignDevice(Long userId, Long deviceId) {
-        findUserOrThrow(userId);
-        if (!deviceRepository.existsById(deviceId)) {
-            throw new EntityNotFoundException("Device not found: " + deviceId);
+    public void deleteUser(Long id, String currentUsername) {
+        User user = findUserOrThrow(id);
+        if (user.getUsername().equals(currentUsername)) {
+            throw new IllegalArgumentException("You cannot delete your own user");
         }
-        if (userDeviceRepository.existsByUserIdAndDeviceId(userId, deviceId)) {
+        if ("ADMIN".equals(user.getRole())) {
+            throw new IllegalArgumentException("Admin users cannot be deleted");
+        }
+
+        userRepository.delete(user);
+    }
+
+    @Transactional
+    public void assignDevice(Long userId, Long deviceId) {
+        User user = findUserOrThrow(userId);
+        Device device = findDeviceOrThrow(deviceId);
+        if (hasDevice(user, deviceId)) {
             return;
         }
 
-        UserDevice userDevice = new UserDevice();
-        userDevice.setUserId(userId);
-        userDevice.setDeviceId(deviceId);
-        userDevice.setCreatedAt(OffsetDateTime.now());
-
-        userDeviceRepository.save(userDevice);
+        user.getDevices().add(device);
     }
 
     @Transactional
     public void removeDevice(Long userId, Long deviceId) {
-        findUserOrThrow(userId);
-        if (!userDeviceRepository.existsByUserIdAndDeviceId(userId, deviceId)) {
+        User user = findUserOrThrow(userId);
+        boolean removed = user.getDevices().removeIf(device -> device.getId().equals(deviceId));
+        if (!removed) {
             throw new EntityNotFoundException("User device relation not found");
         }
-
-        userDeviceRepository.deleteByUserIdAndDeviceId(userId, deviceId);
     }
 
     private User findUserOrThrow(Long id) {
         return userRepository.findById(id)
                 .orElseThrow(() -> new EntityNotFoundException("User not found: " + id));
+    }
+
+    private Device findDeviceOrThrow(Long id) {
+        return deviceRepository.findById(id)
+                .orElseThrow(() -> new EntityNotFoundException("Device not found: " + id));
+    }
+
+    private boolean hasDevice(User user, Long deviceId) {
+        return user.getDevices()
+                .stream()
+                .anyMatch(device -> device.getId().equals(deviceId));
     }
 
     private void validateUniqueUser(UserCreateRequest request) {
@@ -104,5 +123,13 @@ public class UserService {
 
     private boolean isBlank(String value) {
         return value == null || value.isBlank();
+    }
+
+    private String normalizeRole(String role) {
+        String normalizedRole = isBlank(role) ? DEFAULT_ROLE : role.trim().toUpperCase();
+        if (!ALLOWED_ROLES.contains(normalizedRole)) {
+            throw new IllegalArgumentException("Role must be USER or ADMIN");
+        }
+        return normalizedRole;
     }
 }

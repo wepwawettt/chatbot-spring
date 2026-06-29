@@ -2,9 +2,12 @@ package org.example.entity;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 
 import java.time.OffsetDateTime;
@@ -16,8 +19,11 @@ public class Alarm {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "device_id", nullable = false)
-    private Long deviceId;
+    // Bir cihazin birden fazla alarmi olabilir; her alarm sadece bir cihaza baglidir.
+    @ManyToOne(fetch = FetchType.LAZY)
+    // alarms tablosundaki device_id kolonu, devices tablosundaki id kolonuna baglanir.
+    @JoinColumn(name = "device_id", nullable = false)
+    private Device device;
 
     @Column(name = "alarm_type", nullable = false, length = 100)
     private String alarmType;
@@ -40,10 +46,10 @@ public class Alarm {
     public Alarm() {
     }
 
-    public Alarm(Long id, Long deviceId, String alarmType, String severity, String description,
+    public Alarm(Long id, Device device, String alarmType, String severity, String description,
                  OffsetDateTime occurredAt, OffsetDateTime resolvedAt, OffsetDateTime createdAt) {
         this.id = id;
-        this.deviceId = deviceId;
+        this.device = device;
         this.alarmType = alarmType;
         this.severity = severity;
         this.description = description;
@@ -60,12 +66,16 @@ public class Alarm {
         this.id = id;
     }
 
-    public Long getDeviceId() {
-        return deviceId;
+    public Device getDevice() {
+        return device;
     }
 
-    public void setDeviceId(Long deviceId) {
-        this.deviceId = deviceId;
+    public void setDevice(Device device) {
+        this.device = device;
+    }
+
+    public Long getDeviceId() {
+        return device == null ? null : device.getId();
     }
 
     public String getAlarmType() {

@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="tr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Device Alarm Panel</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="topbar">
+    <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+        </div>
+        <div>
+            <h1>Device Alarm Panel</h1>
+            <p>Kullanici, cihaz ve alarm yonetimi</p>
+        </div>
+    </div>
+    <nav class="top-actions" aria-label="Hizli baglantilar">
+        <span id="currentUser" class="current-user hidden"></span>
+        <a class="link-button hidden" href="/swagger-ui.html" target="_blank" rel="noreferrer">Swagger</a>
+        <button id="logoutButton" class="ghost-button hidden" type="button">Cikis</button>
+        <button id="refreshButton" class="icon-button" type="button" title="Verileri yenile" aria-label="Verileri yenile">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 12a8 8 0 1 1-2.3-5.6"></path>
+                <path d="M20 4v6h-6"></path>
+            </svg>
+        </button>
+    </nav>
+</header>
+
+<main>
+    <section id="loginPanel" class="login-panel">
+        <form id="loginForm" class="login-box">
+            <h2>Giris</h2>
+            <label>
+                Kullanici adi
+                <input name="username" type="text" autocomplete="username" required>
+            </label>
+            <label>
+                Sifre
+                <input name="password" type="password" autocomplete="current-password" required>
+            </label>
+            <button class="primary-button" type="submit">Giris yap</button>
+        </form>
+    </section>
+
+    <div id="appContent" class="hidden">
+    <section class="chat-layout">
+        <div class="panel chat-panel">
+            <div class="panel-header controls-header">
+                <h2>PAI Sim Chat</h2>
+                <button id="newChatButton" class="ghost-button" type="button">Yeni sohbet</button>
+            </div>
+            <div id="chatMessages" class="chat-messages"></div>
+            <form id="chatForm" class="chat-form">
+                <textarea name="message" rows="2" placeholder="Ornek: Dun gerceklesen alarmlari bul" required></textarea>
+                <button class="primary-button" type="submit">Gonder</button>
+            </form>
+        </div>
+    </section>
+
+    <section class="summary-grid" aria-label="Ozet">
+        <article class="metric">
+            <span class="metric-label">Kullanicilar</span>
+            <strong id="userCount">0</strong>
+        </article>
+        <article class="metric">
+            <span class="metric-label">Cihazlar</span>
+            <strong id="deviceCount">0</strong>
+        </article>
+        <article class="metric">
+            <span class="metric-label">Aktif cihaz</span>
+            <strong id="activeDeviceCount">0</strong>
+        </article>
+        <article class="metric">
+            <span class="metric-label">Alarmlar</span>
+            <strong id="alarmCount">0</strong>
+        </article>
+    </section>
+
+    <section class="workspace">
+        <div class="panel forms-panel">
+            <div class="panel-header">
+                <h2>Kayit islemleri</h2>
+            </div>
+
+            <div class="tabs" role="tablist" aria-label="Formlar">
+                <button class="tab active" type="button" data-tab="userFormPanel">Kullanici</button>
+                <button class="tab" type="button" data-tab="deviceFormPanel">Cihaz</button>
+                <button class="tab" type="button" data-tab="alarmFormPanel">Alarm</button>
+                <button class="tab" type="button" data-tab="assignFormPanel">Atama</button>
+            </div>
+
+            <form id="userForm" class="form-section active" data-panel="userFormPanel">
+                <label>
+                    Kullanici adi
+                    <input name="username" type="text" autocomplete="off" required>
+                </label>
+                <label>
+                    Email
+                    <input name="email" type="email" autocomplete="off" required>
+                </label>
+                <label>
+                    Sifre
+                    <input name="password" type="password" autocomplete="new-password" required>
+                </label>
+                <label>
+                    Rol
+                    <select name="role">
+                        <option value="USER">USER</option>
+                        <option value="ADMIN">ADMIN</option>
+                    </select>
+                </label>
+                <button class="primary-button" type="submit">Kullanici ekle</button>
+            </form>
+
+            <form id="deviceForm" class="form-section" data-panel="deviceFormPanel">
+                <input name="id" type="hidden">
+                <label>
+                    Cihaz adi
+                    <input name="name" type="text" autocomplete="off" required>
+                </label>
+                <label>
+                    Cihaz turu
+                    <select name="deviceType" required>
+                        <option value="CAMERA">CAMERA</option>
+                        <option value="SENSOR">SENSOR</option>
+                        <option value="GATEWAY">GATEWAY</option>
+                        <option value="THERMOSTAT">THERMOSTAT</option>
+                    </select>
+                </label>
+                <label>
+                    Durum
+                    <select name="status">
+                        <option value="ACTIVE">ACTIVE</option>
+                        <option value="PASSIVE">PASSIVE</option>
+                        <option value="MAINTENANCE">MAINTENANCE</option>
+                    </select>
+                </label>
+                <label>
+                    Konum
+                    <input name="location" type="text" autocomplete="off">
+                </label>
+                <div class="button-row">
+                    <button id="deviceSubmitButton" class="primary-button" type="submit">Cihaz ekle</button>
+                    <button id="deviceCancelButton" class="ghost-button hidden" type="button">Vazgec</button>
+                </div>
+            </form>
+
+            <form id="alarmForm" class="form-section" data-panel="alarmFormPanel">
+                <label>
+                    Cihaz
+                    <select name="deviceId" id="alarmDeviceSelect" required></select>
+                </label>
+                <label>
+                    Alarm tipi
+                    <select name="alarmType" required>
+                        <option value="MOTION">MOTION</option>
+                        <option value="TEMPERATURE">TEMPERATURE</option>
+                        <option value="CONNECTION">CONNECTION</option>
+                    </select>
+                </label>
+                <label>
+                    Onem
+                    <select name="severity">
+                        <option value="LOW">LOW</option>
+                        <option value="MEDIUM">MEDIUM</option>
+                        <option value="HIGH">HIGH</option>
+                    </select>
+                </label>
+                <label>
+                    Aciklama
+                    <textarea name="description" rows="3" required></textarea>
+                </label>
+                <button class="primary-button" type="submit">Alarm olustur</button>
+            </form>
+
+            <form id="assignForm" class="form-section" data-panel="assignFormPanel">
+                <label>
+                    Kullanici
+                    <select name="userId" id="assignUserSelect" required></select>
+                </label>
+                <label>
+                    Cihaz
+                    <select name="deviceId" id="assignDeviceSelect" required></select>
+                </label>
+                <button class="primary-button" type="submit">Cihazi ata</button>
+            </form>
+        </div>
+
+        <div class="panel map-panel" aria-label="Sistem akisi">
+            <div class="panel-header">
+                <h2>Sistem akisi</h2>
+            </div>
+            <div class="flow-asset" aria-hidden="true">
+                <div class="flow-node user-node">Users</div>
+                <div class="flow-line"></div>
+                <div class="flow-node device-node">Devices</div>
+                <div class="flow-line"></div>
+                <div class="flow-node alarm-node">Alarms</div>
+            </div>
+            <div class="status-strip">
+                <span>API</span>
+                <strong id="apiStatus">Kontrol ediliyor</strong>
+            </div>
+        </div>
+    </section>
+
+    <section class="data-grid">
+        <div class="panel">
+            <div class="panel-header">
+                <h2>Kullanicilar</h2>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Ad</th>
+                        <th>Email</th>
+                        <th>Rol</th>
+                        <th></th>
+                    </tr>
+                    </thead>
+                    <tbody id="usersTable"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <h2>Cihazlar</h2>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Ad</th>
+                        <th>Tur</th>
+                        <th>Durum</th>
+                        <th>Konum</th>
+                        <th></th>
+                    </tr>
+                    </thead>
+                    <tbody id="devicesTable"></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <section class="data-grid">
+        <div class="panel">
+            <div class="panel-header controls-header">
+                <h2>Kullanici cihazlari</h2>
+                <select id="userDevicesSelect" aria-label="Kullanici sec"></select>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Cihaz</th>
+                        <th>Durum</th>
+                        <th></th>
+                    </tr>
+                    </thead>
+                    <tbody id="userDevicesTable"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header controls-header">
+                <h2>Alarmlar</h2>
+                <select id="alarmsDeviceSelect" aria-label="Cihaz sec"></select>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Cihaz</th>
+                        <th>Tip</th>
+                        <th>Onem</th>
+                        <th>Zaman</th>
+                    </tr>
+                    </thead>
+                    <tbody id="alarmsTable"></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+    </div>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

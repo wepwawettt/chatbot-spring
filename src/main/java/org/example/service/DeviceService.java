@@ -10,11 +10,16 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.Set;
 
 @Service
 public class DeviceService {
     private static final String DEFAULT_STATUS = "ACTIVE";
+    private static final Set<String> DEVICE_STATUSES = Set.of("ACTIVE", "PASSIVE", "MAINTENANCE");
 
     private final DeviceRepository deviceRepository;
 
@@ -58,6 +63,42 @@ public class DeviceService {
         return DeviceResponse.from(findDeviceOrThrow(id));
     }
 
+    @Transactional(readOnly = true)
+    public List<DeviceResponse> listDevices(String username,
+                                            boolean admin,
+                                            String status,
+                                            String deviceType,
+                                            String nameContains,
+                                            int limit) {
+        return visibleDevices(username, admin, status, deviceType, nameContains)
+                .stream()
+                .limit(Math.max(0, limit))
+                .map(DeviceResponse::from)
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public long countDevices(String username, boolean admin, String status, String deviceType, String nameContains) {
+        return visibleDevices(username, admin, status, deviceType, nameContains).size();
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<DeviceResponse> getDeviceDetail(String username, boolean admin, String identifier) {
+        Long deviceId = parseLong(identifier);
+        if (deviceId != null) {
+            return deviceRepository.findVisibleDeviceScope(username, admin)
+                    .stream()
+                    .filter(device -> device.getId().equals(deviceId))
+                    .findFirst()
+                    .map(DeviceResponse::from);
+        }
+
+        return visibleDevices(username, admin, null, null, identifier)
+                .stream()
+                .findFirst()
+                .map(DeviceResponse::from);
+    }
+
     @Transactional
     public DeviceResponse updateDevice(Long id, DeviceUpdateRequest request) {
         Device device = findDeviceOrThrow(id);
@@ -67,6 +108,19 @@ public class DeviceService {
         device.setLocation(request.getLocation());
         device.setUpdatedAt(OffsetDateTime.now());
 
+        return DeviceResponse.from(deviceRepository.save(device));
+    }
+
+    @Transactional
+    public DeviceResponse updateDeviceStatus(Long id, String status) {
+        String normalizedStatus = allow(normalize(status), DEVICE_STATUSES);
+        if (normalizedStatus == null) {
+            throw new IllegalArgumentException("Unsupported device status: " + status);
+        }
+
+        Device device = findDeviceOrThrow(id);
+        device.setStatus(normalizedStatus);
+        device.setUpdatedAt(OffsetDateTime.now());
         return DeviceResponse.from(deviceRepository.save(device));
     }
 
@@ -81,5 +135,50 @@ public class DeviceService {
     private Device findDeviceOrThrow(Long id) {
         return deviceRepository.findById(id)
                 .orElseThrow(() -> new EntityNotFoundException("Device not found: " + id));
+    }
+
+    private List<Device> visibleDevices(String username,
+                                        boolean admin,
+                                        String status,
+                                        String deviceType,
+                                        String nameContains) {
+        String normalizedStatus = allow(normalize(status), DEVICE_STATUSES);
+        String normalizedDeviceType = normalize(deviceType);
+        String normalizedName = normalize(nameContains);
+
+        return deviceRepository.findVisibleDeviceScope(username, admin)
+                .stream()
+                .filter(device -> normalizedStatus == null || normalizedStatus.equals(normalize(device.getStatus())))
+                .filter(device -> normalizedDeviceType == null || containsNormalized(device.getDeviceType(), normalizedDeviceType))
+                .filter(device -> normalizedName == null || containsNormalized(device.getName(), normalizedName))
+                .sorted(Comparator.comparing(Device::getId))
+                .toList();
+    }
+
+    private String allow(String value, Set<String> allowedValues) {
+        return value != null && allowedValues.contains(value) ? value : null;
+    }
+
+    private String normalize(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return value.toUpperCase(Locale.forLanguageTag("tr-TR")).trim();
+    }
+
+    private boolean containsNormalized(String source, String needle) {
+        String normalizedSource = normalize(source);
+        return normalizedSource != null && normalizedSource.contains(needle);
+    }
+
+    private Long parseLong(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException exception) {
+            return null;
+        }
     }
 }
