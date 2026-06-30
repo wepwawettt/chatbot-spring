@@ -29,8 +29,24 @@ Spring Data JPA
 PostgreSQL
 Swagger/OpenAPI
 Docker Compose
+RabbitMQ
+Caffeine Cache
+Spring Actuator
 Maven Wrapper
 ```
+
+## Production-ready AI parcalari
+
+- Conversation history varsayilan olarak Caffeine cache'te tutulur; `CONVERSATION_PERSISTENCE_ENABLED=true` ile PostgreSQL persistence acilabilir.
+- Multi-turn context desteklenir; onceki kullanici mesajlari referans cozmek icin Gemini'ye kisitli context olarak verilir.
+- AI security layer mesajlari modelden once kontrol eder ve email, token, API key, JDBC URL gibi degerleri maskeler.
+- Riskli promptlar Gemini'ye gonderilmez; admin alert loglanir, SMTP ayari varsa mail atilir.
+- RabbitMQ ile event-driven akis desteklenir: `device.telemetry.generated`, `alarm.created`.
+- Cihaz telemetry simulator servisinden RabbitMQ'ya event basilir; consumer kritik degerlerde alarm olusturur.
+- Chat endpoint kullanici bazinda rate limit uygular.
+- Cihaz/alarm sorgulari Caffeine cache ile cache'lenir; yazma islemlerinde cache temizlenir.
+- Actuator health endpoint'i Kubernetes probe icin aciktir.
+- Demo data initializer mevcut PostgreSQL verisini uygulama acilisinda zenginlestirir ve alarm tarihlerini bugune gore gunceller.
 
 ## Calistirma
 
@@ -64,6 +80,21 @@ API'yi de Docker icinde calistirmak istersen:
 docker compose --profile app up -d --build
 ```
 
+RabbitMQ management UI:
+
+```text
+http://localhost:15672
+guest / guest
+```
+
+Kubernetes manifestlerini uygulamak icin:
+
+```powershell
+kubectl apply -f k8s/
+```
+
+`k8s/app.yaml` icindeki `device-alarm-demo:latest` image'i cluster tarafinda bulunmali veya kendi registry image adinla degistirilmelidir.
+
 Database verisini de silerek sifirlamak icin:
 
 ```powershell
@@ -93,6 +124,16 @@ users
 devices
 user_devices
 alarms
+conversations
+conversation_messages
+```
+
+Not: `conversations` ve `conversation_messages` tablolari DB persistence opsiyonel kullanimi icin kalir. Varsayilan ayarda aktif chat context'i cache'tedir ve bu tablolar dolmaz.
+
+Demo verisini kapatmak istersen:
+
+```powershell
+$env:DEMO_DATA_ENABLED="false"
 ```
 
 ## Temel API Akisi
@@ -152,6 +193,9 @@ http://localhost:8080/v3/api-docs
 
 ```text
 POST /api/chat
+GET  /api/chat/conversations
+GET  /api/chat/conversations/{conversationId}/messages
+DELETE /api/chat/conversations
 ```
 
 ## Ornek Requestler

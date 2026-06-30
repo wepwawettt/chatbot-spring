@@ -7,6 +7,9 @@ import org.example.entity.Alarm;
 import org.example.entity.Device;
 import org.example.repository.AlarmRepository;
 import org.example.repository.DeviceRepository;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -18,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -30,15 +34,20 @@ public class AlarmService {
 
     private final AlarmRepository alarmRepository;
     private final DeviceRepository deviceRepository;
+    private final DomainEventPublisher eventPublisher;
 
     // Spring bu constructor ile gerekli repository nesnelerini service icine verir.
-    public AlarmService(AlarmRepository alarmRepository, DeviceRepository deviceRepository) {
+    public AlarmService(AlarmRepository alarmRepository,
+                        DeviceRepository deviceRepository,
+                        DomainEventPublisher eventPublisher) {
         this.alarmRepository = alarmRepository;
         this.deviceRepository = deviceRepository;
+        this.eventPublisher = eventPublisher;
     }
 
     // Yeni alarm olusturur: once cihazi kontrol eder, sonra Alarm entity'sini kaydeder.
     @Transactional
+    @CacheEvict(cacheNames = {"alarms", "alarmCounts", "alarmGroups"}, allEntries = true)
     public AlarmResponse createAlarm(AlarmCreateRequest request) {
         // Alarm kaydetmeden once request icindeki deviceId gercekten var mi kontrol edilir.
         Device device = findDeviceOrThrow(request.getDeviceId());
@@ -54,11 +63,26 @@ public class AlarmService {
         alarm.setCreatedAt(now);
 
         // Kaydedilen Alarm entity'si, kullaniciya donecek AlarmResponse DTO'suna cevrilir.
-        return AlarmResponse.from(alarmRepository.save(alarm), device.getName());
+        AlarmResponse response = AlarmResponse.from(alarmRepository.save(alarm), device.getName());
+        eventPublisher.publishAlarmCreated(response);
+        return response;
+    }
+
+    @Transactional
+    @CacheEvict(cacheNames = {"alarms", "alarmCounts", "alarmGroups"}, allEntries = true)
+    public AlarmResponse createAlarm(String username, boolean admin, AlarmCreateRequest request) {
+        boolean visible = deviceRepository.findVisibleDeviceScope(username, admin)
+                .stream()
+                .anyMatch(device -> device.getId().equals(request.getDeviceId()));
+        if (!visible) {
+            throw new AccessDeniedException("You can only create alarms for visible devices");
+        }
+        return createAlarm(request);
     }
 
     // Verilen cihaza ait alarm listesini getirir.
     @Transactional(readOnly = true)
+    @Cacheable(cacheNames = "alarms", key = "'device:' + #deviceId")
     public List<AlarmResponse> getAlarmsByDeviceId(Long deviceId) {
         // Cihaz yoksa alarm aramak yerine hata firlatilir; varsa cihaz adi response'a eklenir.
         Device device = findDeviceOrThrow(deviceId);
@@ -70,14 +94,41 @@ public class AlarmService {
                 .toList();
     }
 
+    @Transactional(readOnly = true)
+    @Cacheable(cacheNames = "alarms", key = "'visible-device-basic:' + #username + ':' + #admin + ':' + #deviceId")
+    public List<AlarmResponse> getVisibleAlarmsByDeviceId(String username, boolean admin, Long deviceId) {
+        return listAlarmsByDeviceId(username, admin, deviceId, null, null, null, null, Integer.MAX_VALUE);
+    }
+
     // Id ile tek bir alarm getirir; alarm yoksa hata firlatir.
     @Transactional(readOnly = true)
+    @Cacheable(cacheNames = "alarms", key = "'id:' + #id")
     public AlarmResponse getAlarmById(Long id) {
         return toResponse(alarmRepository.findById(id)
                 .orElseThrow(() -> new EntityNotFoundException("Alarm not found: " + id)));
     }
 
+    @Transactional(readOnly = true)
+    public AlarmResponse getVisibleAlarmById(String username, boolean admin, Long id) {
+        return getAlarmDetail(username, admin, id)
+                .orElseThrow(() -> new EntityNotFoundException("Alarm not found: " + id));
+    }
+
+    @Transactional(readOnly = true)
+    @Cacheable(cacheNames = "alarms", key = "'visible-id:' + #username + ':' + #admin + ':' + #id")
+    public Optional<AlarmResponse> getAlarmDetail(String username, boolean admin, Long id) {
+        if (id == null) {
+            return Optional.empty();
+        }
+        return alarmRepository.findVisibleAlarmScope(username, admin)
+                .stream()
+                .filter(alarm -> alarm.getId().equals(id))
+                .findFirst()
+                .map(this::toResponse);
+    }
+
     @Transactional
+    @CacheEvict(cacheNames = {"alarms", "alarmCounts", "alarmGroups"}, allEntries = true)
     public AlarmResponse resolveAlarm(Long id) {
         Alarm alarm = alarmRepository.findById(id)
                 .orElseThrow(() -> new EntityNotFoundException("Alarm not found: " + id));
@@ -88,6 +139,7 @@ public class AlarmService {
     }
 
     @Transactional(readOnly = true)
+    @Cacheable(cacheNames = "alarms", key = "#username + ':' + #admin + ':' + #status + ':' + #dateRange + ':' + #startDate + ':' + #endDate + ':' + #limit")
     public List<AlarmResponse> listAlarms(String username,
                                           boolean admin,
                                           String status,
@@ -103,6 +155,28 @@ public class AlarmService {
     }
 
     @Transactional(readOnly = true)
+    @Cacheable(cacheNames = "alarms", key = "'visible-device:' + #username + ':' + #admin + ':' + #deviceId + ':' + #status + ':' + #dateRange + ':' + #startDate + ':' + #endDate + ':' + #limit")
+    public List<AlarmResponse> listAlarmsByDeviceId(String username,
+                                                    boolean admin,
+                                                    Long deviceId,
+                                                    String status,
+                                                    String dateRange,
+                                                    String startDate,
+                                                    String endDate,
+                                                    int limit) {
+        if (deviceId == null) {
+            return List.of();
+        }
+        return visibleAlarms(username, admin, status, dateRange, startDate, endDate)
+                .stream()
+                .filter(alarm -> alarm.getDevice().getId().equals(deviceId))
+                .limit(Math.max(0, limit))
+                .map(this::toResponse)
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    @Cacheable(cacheNames = "alarmCounts", key = "#username + ':' + #admin + ':' + #status + ':' + #dateRange + ':' + #startDate + ':' + #endDate")
     public long countAlarms(String username,
                             boolean admin,
                             String status,
@@ -113,6 +187,25 @@ public class AlarmService {
     }
 
     @Transactional(readOnly = true)
+    @Cacheable(cacheNames = "alarmCounts", key = "'device:' + #username + ':' + #admin + ':' + #deviceId + ':' + #status + ':' + #dateRange + ':' + #startDate + ':' + #endDate")
+    public long countAlarmsByDeviceId(String username,
+                                      boolean admin,
+                                      Long deviceId,
+                                      String status,
+                                      String dateRange,
+                                      String startDate,
+                                      String endDate) {
+        if (deviceId == null) {
+            return 0;
+        }
+        return visibleAlarms(username, admin, status, dateRange, startDate, endDate)
+                .stream()
+                .filter(alarm -> alarm.getDevice().getId().equals(deviceId))
+                .count();
+    }
+
+    @Transactional(readOnly = true)
+    @Cacheable(cacheNames = "alarmGroups", key = "#username + ':' + #admin + ':' + #groupBy + ':' + #status + ':' + #dateRange + ':' + #startDate + ':' + #endDate")
     public List<GroupCount> groupAlarmsBy(String username,
                                           boolean admin,
                                           String groupBy,
@@ -132,16 +225,16 @@ public class AlarmService {
     }
 
     @Transactional(readOnly = true)
+    @Cacheable(cacheNames = "alarmGroups", key = "'top:' + #username + ':' + #admin + ':' + #groupBy + ':' + #metric + ':' + #status + ':' + #dateRange + ':' + #startDate + ':' + #endDate + ':' + #limit")
     public List<GroupCount> getTopAlarmGroups(String username,
                                               boolean admin,
                                               String groupBy,
                                               String metric,
                                               String status,
-                                              String dateRange,
-                                              String startDate,
-                                              String endDate,
-                                              int limit) {
-        // TODO: metric alarm_count disindaki metrikleri destekleyecek sekilde genisletilebilir.
+                                               String dateRange,
+                                               String startDate,
+                                               String endDate,
+                                               int limit) {
         return groupAlarmsBy(username, admin, groupBy, status, dateRange, startDate, endDate)
                 .stream()
                 .limit(Math.max(0, limit))
@@ -149,6 +242,7 @@ public class AlarmService {
     }
 
     @Transactional(readOnly = true)
+    @Cacheable(cacheNames = "alarmCounts", key = "'ranges:' + #username + ':' + #admin + ':' + #status + ':' + #dateRanges")
     public List<DateRangeCount> countAlarmsForDateRanges(String username,
                                                          boolean admin,
                                                          String status,
@@ -276,7 +370,7 @@ public class AlarmService {
         if (value == null || value.isBlank()) {
             return null;
         }
-        return value.toUpperCase(Locale.forLanguageTag("tr-TR")).trim();
+        return value.toUpperCase(Locale.ROOT).trim();
     }
 
     private record DateWindow(OffsetDateTime start, OffsetDateTime end) {

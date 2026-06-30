@@ -10,10 +10,12 @@ import org.example.repository.DeviceRepository;
 import org.example.repository.UserRepository;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Optional;
 
 @Service
 public class UserService {
@@ -61,6 +63,33 @@ public class UserService {
     @Transactional(readOnly = true)
     public UserResponse getUserById(Long id) {
         return UserResponse.from(findUserOrThrow(id));
+    }
+
+    @Transactional(readOnly = true)
+    public UserResponse getVisibleUserById(String currentUsername, boolean admin, Long id) {
+        User user = findUserOrThrow(id);
+        if (!admin && !user.getUsername().equals(currentUsername)) {
+            throw new AccessDeniedException("You can only access your own user");
+        }
+        return UserResponse.from(user);
+    }
+
+    @Transactional(readOnly = true)
+    public boolean canAccessUser(String currentUsername, boolean admin, Long userId) {
+        if (admin) {
+            return true;
+        }
+        User user = findUserOrThrow(userId);
+        return user.getUsername().equals(currentUsername);
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<UserResponse> findUserByUsername(String username) {
+        if (isBlank(username)) {
+            return Optional.empty();
+        }
+        return userRepository.findByUsername(username.trim())
+                .map(UserResponse::from);
     }
 
     @Transactional

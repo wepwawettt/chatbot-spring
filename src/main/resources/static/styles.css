@@ -257,19 +257,67 @@ main {
     padding: 11px 13px;
     border: 1px solid var(--border);
     border-radius: 8px;
-    white-space: pre-wrap;
     line-height: 1.45;
+    overflow-wrap: anywhere;
 }
 
 .chat-bubble.user {
     justify-self: end;
     background: #e8f2ed;
     border-color: #bad4c7;
+    white-space: pre-wrap;
 }
 
 .chat-bubble.assistant {
     justify-self: start;
     background: #ffffff;
+}
+
+.chat-bubble.assistant p {
+    margin: 0;
+}
+
+.chat-bubble.assistant p + p,
+.chat-bubble.assistant p + .answer-list,
+.chat-bubble.assistant .answer-list + p,
+.chat-bubble.assistant .answer-fields + p {
+    margin-top: 8px;
+}
+
+.answer-list {
+    display: grid;
+    gap: 6px;
+    margin: 8px 0 0;
+    padding-left: 19px;
+}
+
+.answer-list:first-child {
+    margin-top: 0;
+}
+
+.answer-list li {
+    padding-left: 2px;
+}
+
+.answer-fields {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 6px 12px;
+    margin: 0;
+}
+
+.answer-fields dt {
+    color: var(--muted);
+    font-weight: 700;
+}
+
+.answer-fields dd {
+    margin: 0;
+    min-width: 0;
+}
+
+.answer-fields .answer-list {
+    margin-top: 0;
 }
 
 .chat-bubble.pending {
@@ -551,6 +599,20 @@ tr:last-child td {
 
 .hidden {
     display: none !important;
+}
+
+.role-user .tabs,
+.role-user .admin-action-col,
+.role-user #userDevicesSelect {
+    display: none !important;
+}
+
+.role-user .user-devices-panel {
+    display: none !important;
+}
+
+.role-user .alarms-panel {
+    grid-column: 1 / -1;
 }
 
 .toast {

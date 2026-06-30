@@ -5,7 +5,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties(prefix = "app.ai.gemini")
 public class GeminiProperties {
     private String apiKey;
-    private String model = "gemini-3.5-flash";
+    private String model = "gemini-2.5-flash";
     private String baseUrl = "https://generativelanguage.googleapis.com";
 
     public String getApiKey() {

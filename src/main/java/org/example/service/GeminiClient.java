@@ -18,6 +18,8 @@ import java.util.Optional;
 @Component
 public class GeminiClient {
     private static final Logger log = LoggerFactory.getLogger(GeminiClient.class);
+    private static final int MAX_ATTEMPTS = 3;
+    private static final long RETRY_DELAY_MS = 500;
 
     private static final String SYSTEM_PROMPT = """
             You are an intent extraction engine for a Spring Boot backend.
@@ -32,11 +34,14 @@ public class GeminiClient {
             Return DEVICE_QUERY or ALARM_QUERY only when the user clearly asks for backend data.
             Queries read data only. Examples:
             - "aktif cihazlari getir" => DEVICE_QUERY + LIST, filter status ACTIVE.
+            - "id si 7 olan kullanicinin cihazlarini goruntule" => DEVICE_QUERY + LIST, target "user_devices", entityId 7.
+            - "buragin cihazlarini getir" => DEVICE_QUERY + LIST, target "user_devices", entityName "burak".
             - "son 10 alarmi listele" => ALARM_QUERY + LIST, limit 10.
             - "hangi cihazlarda alarm var" => ALARM_QUERY + GROUP_BY, groupBy "device".
             Commands request a write operation. Examples:
             - "Depo Kamerasi cihazini pasif yap" => DEVICE_COMMAND + UPDATE_STATUS, entityName "Depo Kamerasi", status "PASSIVE".
             - "4 numarali cihazi aktif yap" => DEVICE_COMMAND + UPDATE_STATUS, entityId 4, status "ACTIVE".
+            - "Bahce Kamerasi adli CAMERA cihaz ekle" => DEVICE_COMMAND + CREATE, entityName "Bahce Kamerasi", deviceType "CAMERA".
             - "371 numarali alarmi cozuldu yap" => ALARM_COMMAND + RESOLVE, entityId 371.
             - "Depo Kamerasi icin sicaklik alarmi olustur" => ALARM_COMMAND + CREATE, entityName "Depo Kamerasi", alarmType "TEMPERATURE".
             Never execute commands. Only describe the intended command in JSON; the backend will ask for confirmation.
@@ -50,7 +55,7 @@ public class GeminiClient {
             {
               "action": "...",
               "operation": "...",
-              "target": "...",
+              "target": "devices | user_devices | alarms | alarm_count | ...",
               "groupBy": "...",
               "metric": "...",
               "filters": {
@@ -91,27 +96,73 @@ public class GeminiClient {
             return Optional.empty();
         }
 
-        try {
-            String responseBody = restClient.post()
-                    .uri(uriBuilder -> uriBuilder
-                            .path("/v1beta/models/{model}:generateContent")
-                            .queryParam("key", properties.getApiKey())
-                            .build(properties.getModel()))
-                    .body(buildRequestBody(userMessage))
-                    .retrieve()
-                    .body(String.class);
+        log.info("Gemini request starting. model={}, baseUrl={}, messagePreview=\"{}\"",
+                properties.getModel(), trimTrailingSlash(properties.getBaseUrl()), preview(userMessage));
 
-            String text = extractText(responseBody);
-            if (text == null || text.isBlank()) {
-                return Optional.of(AiActionResponse.unknown());
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                String responseBody = generateContent(userMessage);
+                log.info("Gemini response received. model={}, attempt={}, responseChars={}",
+                        properties.getModel(), attempt, responseBody == null ? 0 : responseBody.length());
+
+                String text = extractText(responseBody);
+                if (text == null || text.isBlank()) {
+                    log.info("Gemini response text is empty. Returning UNKNOWN.");
+                    return Optional.of(AiActionResponse.unknown());
+                }
+
+                AiActionResponse action = parseAction(text);
+                log.info("Gemini action parsed. action={}, operation={}, target={}, entityId={}, entityName={}, limit={}",
+                        action.action(), action.operation(), action.target(), action.entityId(), action.entityName(), action.limit());
+                return Optional.of(action);
+            } catch (HttpStatusCodeException exception) {
+                if (exception.getStatusCode().value() == 503 && attempt < MAX_ATTEMPTS) {
+                    log.warn("Gemini API temporarily unavailable for model {}. Retrying {}/{}.",
+                            properties.getModel(), attempt + 1, MAX_ATTEMPTS);
+                    if (!sleepBeforeRetry(attempt)) {
+                        return Optional.empty();
+                    }
+                    continue;
+                }
+                log.warn("Gemini API call failed with status {}: {}", exception.getStatusCode(), exception.getResponseBodyAsString());
+                return Optional.empty();
+            } catch (RuntimeException exception) {
+                log.warn("Gemini API call failed.", exception);
+                return Optional.empty();
             }
-            return Optional.of(parseAction(text));
-        } catch (HttpStatusCodeException exception) {
-            log.warn("Gemini API call failed with status {}: {}", exception.getStatusCode(), exception.getResponseBodyAsString());
-            return Optional.empty();
-        } catch (RuntimeException exception) {
-            log.warn("Gemini API call failed.", exception);
-            return Optional.empty();
+        }
+        return Optional.empty();
+    }
+
+    private String preview(String value) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        String normalized = value.replaceAll("\\s+", " ").trim();
+        if (normalized.length() <= 120) {
+            return normalized;
+        }
+        return normalized.substring(0, 120) + "...";
+    }
+
+    private String generateContent(String userMessage) {
+        return restClient.post()
+                .uri(uriBuilder -> uriBuilder
+                        .path("/v1beta/models/{model}:generateContent")
+                        .queryParam("key", properties.getApiKey())
+                        .build(properties.getModel()))
+                .body(buildRequestBody(userMessage))
+                .retrieve()
+                .body(String.class);
+    }
+
+    private boolean sleepBeforeRetry(int attempt) {
+        try {
+            Thread.sleep(RETRY_DELAY_MS * attempt);
+            return true;
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            return false;
         }
     }
 

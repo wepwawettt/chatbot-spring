@@ -7,6 +7,7 @@ import org.example.dto.DeviceUpdateRequest;
 import org.example.service.DeviceService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -35,13 +36,14 @@ public class DeviceController {
     }
 
     @GetMapping
-    public List<DeviceResponse> getAllDevices() {
-        return deviceService.getAllDevices();
+    public List<DeviceResponse> getAllDevices(Authentication authentication) {
+        return deviceService.getVisibleDevices(authentication.getName(), isAdmin(authentication));
     }
 
     @GetMapping("/{id}")
-    public DeviceResponse getDeviceById(@PathVariable Long id) {
-        return deviceService.getDeviceById(id);
+    public DeviceResponse getDeviceById(@PathVariable Long id, Authentication authentication) {
+        return deviceService.getVisibleDeviceById(authentication.getName(), isAdmin(authentication), id)
+                .orElseThrow(() -> new jakarta.persistence.EntityNotFoundException("Device not found: " + id));
     }
 
     @PutMapping("/{id}")
@@ -53,5 +55,11 @@ public class DeviceController {
     public ResponseEntity<Void> deleteDevice(@PathVariable Long id) {
         deviceService.deleteDevice(id);
         return ResponseEntity.noContent().build();
+    }
+
+    private boolean isAdmin(Authentication authentication) {
+        return authentication.getAuthorities()
+                .stream()
+                .anyMatch(authority -> "ROLE_ADMIN".equals(authority.getAuthority()));
     }
 }

@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: device-alarm-config
+  namespace: device-alarm-demo
+data:
+  SERVER_PORT: "8080"
+  SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/device_alarm_demo"
+  SPRING_DATASOURCE_USERNAME: "postgres"
+  RABBITMQ_ENABLED: "true"
+  RABBITMQ_HOST: "rabbitmq"
+  RABBITMQ_USERNAME: "guest"
+  SIMULATOR_ENABLED: "true"
+  SIMULATOR_FIXED_DELAY_MS: "60000"
+  GEMINI_MODEL: "gemini-2.5-flash"
+  ADMIN_ALERT_MAIL_ENABLED: "false"
+  CHAT_RATE_LIMIT: "20"
+  CHAT_RATE_LIMIT_WINDOW_SECONDS: "60"

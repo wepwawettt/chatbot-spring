@@ -65,11 +65,11 @@
 
     <section class="summary-grid" aria-label="Ozet">
         <article class="metric">
-            <span class="metric-label">Kullanicilar</span>
+            <span id="userMetricLabel" class="metric-label">Kullanicilar</span>
             <strong id="userCount">0</strong>
         </article>
         <article class="metric">
-            <span class="metric-label">Cihazlar</span>
+            <span id="deviceMetricLabel" class="metric-label">Cihazlar</span>
             <strong id="deviceCount">0</strong>
         </article>
         <article class="metric">
@@ -85,7 +85,7 @@
     <section class="workspace">
         <div class="panel forms-panel">
             <div class="panel-header">
-                <h2>Kayit islemleri</h2>
+                <h2 id="formsPanelTitle">Kayit islemleri</h2>
             </div>
 
             <div class="tabs" role="tablist" aria-label="Formlar">
@@ -211,9 +211,9 @@
     </section>
 
     <section class="data-grid">
-        <div class="panel">
+        <div class="panel users-panel">
             <div class="panel-header">
-                <h2>Kullanicilar</h2>
+                <h2 id="usersPanelTitle">Kullanicilar</h2>
             </div>
             <div class="table-wrap">
                 <table>
@@ -223,7 +223,7 @@
                         <th>Ad</th>
                         <th>Email</th>
                         <th>Rol</th>
-                        <th></th>
+                        <th class="admin-action-col"></th>
                     </tr>
                     </thead>
                     <tbody id="usersTable"></tbody>
@@ -231,9 +231,9 @@
             </div>
         </div>
 
-        <div class="panel">
+        <div class="panel devices-panel">
             <div class="panel-header">
-                <h2>Cihazlar</h2>
+                <h2 id="devicesPanelTitle">Cihazlar</h2>
             </div>
             <div class="table-wrap">
                 <table>
@@ -244,7 +244,7 @@
                         <th>Tur</th>
                         <th>Durum</th>
                         <th>Konum</th>
-                        <th></th>
+                        <th class="admin-action-col"></th>
                     </tr>
                     </thead>
                     <tbody id="devicesTable"></tbody>
@@ -254,9 +254,9 @@
     </section>
 
     <section class="data-grid">
-        <div class="panel">
+        <div class="panel user-devices-panel">
             <div class="panel-header controls-header">
-                <h2>Kullanici cihazlari</h2>
+                <h2 id="userDevicesPanelTitle">Kullanici cihazlari</h2>
                 <select id="userDevicesSelect" aria-label="Kullanici sec"></select>
             </div>
             <div class="table-wrap">
@@ -266,7 +266,7 @@
                         <th>ID</th>
                         <th>Cihaz</th>
                         <th>Durum</th>
-                        <th></th>
+                        <th class="admin-action-col"></th>
                     </tr>
                     </thead>
                     <tbody id="userDevicesTable"></tbody>
@@ -274,7 +274,7 @@
             </div>
         </div>
 
-        <div class="panel">
+        <div class="panel alarms-panel">
             <div class="panel-header controls-header">
                 <h2>Alarmlar</h2>
                 <select id="alarmsDeviceSelect" aria-label="Cihaz sec"></select>

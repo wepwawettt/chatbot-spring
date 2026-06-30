@@ -1,5 +1,6 @@
 package org.example.service;
 
+import jakarta.persistence.EntityNotFoundException;
 import org.example.dto.ActionType;
 import org.example.dto.AiActionResponse;
 import org.example.dto.AlarmCreateRequest;
@@ -9,6 +10,7 @@ import org.example.dto.DeviceCreateRequest;
 import org.example.dto.DeviceResponse;
 import org.example.dto.GeminiFilters;
 import org.example.dto.OperationType;
+import org.example.dto.UserResponse;
 import org.example.service.AlarmService.DateRangeCount;
 import org.example.service.AlarmService.GroupCount;
 import org.slf4j.Logger;
@@ -17,6 +19,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.text.Normalizer;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -43,22 +46,35 @@ public class AiAgentService {
     private static final ZoneId APP_ZONE = ZoneId.of("Europe/Istanbul");
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm", Locale.forLanguageTag("tr-TR"));
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("dd.MM.yyyy", Locale.forLanguageTag("tr-TR"));
+    private static final DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm", Locale.forLanguageTag("tr-TR"));
     private static final Set<String> DEVICE_STATUSES = Set.of("ACTIVE", "PASSIVE", "MAINTENANCE");
     private static final Set<String> DEVICE_TYPES = Set.of("CAMERA", "SENSOR", "GATEWAY", "UPS", "GENERATOR", "THERMOSTAT");
-    private static final Set<String> ALARM_TYPES = Set.of("MOTION", "TEMPERATURE", "CONNECTION");
+    private static final Set<String> ALARM_TYPES = Set.of("MOTION", "TEMPERATURE", "CONNECTION", "FAILURE");
     private static final Set<String> ALARM_SEVERITIES = Set.of("LOW", "MEDIUM", "HIGH");
 
     private final GeminiClient geminiClient;
     private final DeviceService deviceService;
     private final AlarmService alarmService;
+    private final UserService userService;
+    private final ConversationService conversationService;
+    private final AiSecurityService aiSecurityService;
+    private final AdminAlertService adminAlertService;
     private final Map<String, PendingCommand> pendingCommands = new ConcurrentHashMap<>();
 
     public AiAgentService(GeminiClient geminiClient,
                           DeviceService deviceService,
-                          AlarmService alarmService) {
+                          AlarmService alarmService,
+                          UserService userService,
+                          ConversationService conversationService,
+                          AiSecurityService aiSecurityService,
+                          AdminAlertService adminAlertService) {
         this.geminiClient = geminiClient;
         this.deviceService = deviceService;
         this.alarmService = alarmService;
+        this.userService = userService;
+        this.conversationService = conversationService;
+        this.aiSecurityService = aiSecurityService;
+        this.adminAlertService = adminAlertService;
     }
 
     public ChatResponse answer(String username, boolean admin, String message) {
@@ -67,8 +83,30 @@ public class AiAgentService {
 
     @Transactional
     public ChatResponse answer(String username, boolean admin, String conversationId, String message) {
-        String safeMessage = message == null ? "" : message;
-        String sessionKey = sessionKey(username, conversationId);
+        AiSecurityService.AiSecurityResult securityResult = aiSecurityService.inspect(message);
+        String safeMessage = securityResult.sanitizedMessage();
+        ConversationService.ConversationContext conversation = conversationService.start(username, conversationId, safeMessage);
+        if (!securityResult.allowed()) {
+            adminAlertService.securityIncident(username, securityResult.reason(), safeMessage);
+            ChatResponse blockedResponse = new ChatResponse(
+                    "Bu istegi guvenlik nedeniyle isleyemem. Yetki veya veri guvenligi riski olusturan bilgileri paylasamam.",
+                    false
+            );
+            conversationService.saveAssistantMessage(username, conversation.conversationId(), blockedResponse.answer());
+            return blockedResponse.withConversationId(conversation.conversationId());
+        }
+
+        ChatResponse response = answerInternal(username, admin, conversation, safeMessage);
+        conversationService.saveAssistantMessage(username, conversation.conversationId(), response.answer());
+        return response.withConversationId(conversation.conversationId());
+    }
+
+    private ChatResponse answerInternal(String username,
+                                        boolean admin,
+                                        ConversationService.ConversationContext conversation,
+                                        String safeMessage) {
+        String normalizedMessage = normalizeText(conversation.backendContextMessage());
+        String sessionKey = sessionKey(username, conversation.conversationId());
         try {
             Optional<ChatResponse> pendingResponse = answerPendingCommand(sessionKey, username, admin, safeMessage);
             if (pendingResponse.isPresent()) {
@@ -80,16 +118,42 @@ public class AiAgentService {
                 return directResponse.get();
             }
 
-            Optional<AiActionResponse> geminiAction = geminiClient.extractAction(safeMessage);
+            Optional<ChatResponse> deviceAlarmsResponse = answerDeviceAlarms(username, admin, safeMessage);
+            if (deviceAlarmsResponse.isPresent()) {
+                return deviceAlarmsResponse.get();
+            }
+
+            Optional<ChatResponse> referencedDetail = answerReferencedDetail(
+                    username,
+                    admin,
+                    safeMessage,
+                    conversation.lastAssistantMessage()
+            );
+            if (referencedDetail.isPresent()) {
+                return referencedDetail.get();
+            }
+
+            Optional<AiActionResponse> userDevicesAction = userDevicesAction(normalizedMessage);
+            if (userDevicesAction.isPresent()) {
+                return route(username, admin, sessionKey, normalizedMessage, userDevicesAction.get());
+            }
+
+            Optional<AiActionResponse> geminiAction = geminiClient.extractAction(conversation.aiMessage());
             AiActionResponse action = geminiAction.orElse(null);
+            if (isUserDevicesQuery(normalizedMessage) && !isUserDevicesRequest(action)) {
+                AiActionResponse userDevicesFallback = fallbackDeviceAction(normalizedMessage);
+                if (isUserDevicesRequest(userDevicesFallback)) {
+                    action = userDevicesFallback;
+                }
+            }
             if (action == null || isUnknown(action) || commandNeedsTargetFallback(action)) {
-                AiActionResponse fallback = fallbackAction(safeMessage);
+                AiActionResponse fallback = fallbackAction(conversation.backendContextMessage());
                 if (!isUnknown(fallback) || action == null) {
                     action = fallback;
                 }
             }
 
-            ChatResponse response = route(username, admin, sessionKey, action);
+            ChatResponse response = route(username, admin, sessionKey, normalizedMessage, action);
             if (!response.success() && isUnknown(action)) {
                 return unknownWithHint();
             }
@@ -100,13 +164,17 @@ public class AiAgentService {
         }
     }
 
-    private ChatResponse route(String username, boolean admin, String sessionKey, AiActionResponse actionResponse) {
+    private ChatResponse route(String username,
+                               boolean admin,
+                               String sessionKey,
+                               String normalizedMessage,
+                               AiActionResponse actionResponse) {
         ActionType action = actionResponse.action() == null ? ActionType.UNKNOWN : actionResponse.action();
         OperationType operation = actionResponse.operation() == null ? OperationType.UNKNOWN : actionResponse.operation();
         GeminiFilters filters = actionResponse.filters() == null ? new GeminiFilters() : actionResponse.filters();
 
         return switch (action) {
-            case DEVICE_QUERY -> routeDeviceQuery(username, admin, operation, filters, actionResponse.limit());
+            case DEVICE_QUERY -> routeDeviceQuery(username, admin, normalizedMessage, operation, actionResponse, filters, actionResponse.limit());
             case ALARM_QUERY -> routeAlarmQuery(username, admin, operation, actionResponse, filters);
             case DEVICE_COMMAND, ALARM_COMMAND -> routeCommand(username, admin, sessionKey, action, operation, actionResponse, filters);
             case CALCULATION -> routeCalculation(username, admin, operation, actionResponse, filters);
@@ -117,12 +185,26 @@ public class AiAgentService {
 
     private ChatResponse routeDeviceQuery(String username,
                                           boolean admin,
+                                          String normalizedMessage,
                                           OperationType operation,
+                                          AiActionResponse actionResponse,
                                           GeminiFilters filters,
                                           Integer requestedLimit) {
+        Long userDevicesUserId = isUserDevicesRequest(actionResponse)
+                ? resolveUserDevicesUserId(username, normalizedMessage, actionResponse)
+                : null;
+        if (isUserDevicesRequest(actionResponse)) {
+            log.info("User devices query resolved. entityId={}, entityName={}, resolvedUserId={}",
+                    actionResponse.entityId(), actionResponse.entityName(), userDevicesUserId);
+        }
+
         return switch (operation) {
-            case LIST -> listDevices(username, admin, filters, requestedLimit);
-            case COUNT -> countDevices(username, admin, filters);
+            case LIST -> isUserDevicesRequest(actionResponse)
+                    ? listUserDevices(username, admin, userDevicesUserId, requestedLimit)
+                    : listDevices(username, admin, filters, requestedLimit);
+            case COUNT -> isUserDevicesRequest(actionResponse)
+                    ? countUserDevices(username, admin, userDevicesUserId)
+                    : countDevices(username, admin, filters);
             case DETAIL -> deviceDetail(username, admin, filters);
             default -> unknown();
         };
@@ -136,6 +218,7 @@ public class AiAgentService {
         return switch (operation) {
             case LIST -> listAlarms(username, admin, filters, actionResponse.limit());
             case COUNT -> countAlarms(username, admin, filters);
+            case DETAIL -> alarmDetail(username, admin, actionResponse.entityId());
             case GROUP_BY -> groupAlarms(username, admin, actionResponse.groupBy(), filters);
             case TOP_N -> topAlarmGroups(username, admin, actionResponse.groupBy(), actionResponse.metric(), filters, actionResponse.limit());
             default -> unknown();
@@ -148,7 +231,6 @@ public class AiAgentService {
                                           AiActionResponse actionResponse,
                                           GeminiFilters filters) {
         if (!isAlarmCountMetric(actionResponse)) {
-            // TODO: device_count, resolved duration, severity-based metrics gibi metrikler eklenebilir.
             return unknown();
         }
 
@@ -223,8 +305,8 @@ public class AiAgentService {
 
         DeviceResolution resolution = resolveDevice(username, admin, actionResponse, filters);
         if (resolution.ambiguous()) {
-            return new ChatResponse("Birden fazla cihaz eslesti: " + summarizeDevices(resolution.matches())
-                    + ". Lutfen komutu cihaz id ile yaz.", false);
+            return new ChatResponse("Birden fazla cihaz eslesti:\n" + summarizeDevices(resolution.matches())
+                    + "\n\nLutfen komutu cihaz id ile yaz.", false);
         }
         if (resolution.isNotFound()) {
             return new ChatResponse("Islem icin tek bir cihaz belirleyemedim. Cihaz id veya adini yaz.", false);
@@ -235,8 +317,10 @@ public class AiAgentService {
                 device.getId(),
                 device.getName(),
                 requestedStatus,
-                "#" + device.getId() + " " + device.getName() + " cihazinin durumunu " + requestedStatus
-                        + " yapayim mi? Onay icin evet, iptal icin hayir yaz."
+                "Onay gerekiyor:\n"
+                        + "- Cihaz: #" + device.getId() + " " + device.getName() + "\n"
+                        + "- Yeni durum: " + requestedStatus + "\n\n"
+                        + "Onay icin evet, iptal icin hayir yaz."
         );
         pendingCommands.put(sessionKey, pending);
         return new ChatResponse(pending.confirmationText(), false);
@@ -256,8 +340,11 @@ public class AiAgentService {
                 deviceName.trim(),
                 deviceType,
                 finalStatus,
-                deviceName.trim() + " adli " + deviceType + " cihazini " + finalStatus
-                        + " durumuyla olusturayim mi? Onay icin evet, iptal icin hayir yaz."
+                "Onay gerekiyor:\n"
+                        + "- Cihaz: " + deviceName.trim() + "\n"
+                        + "- Tip: " + deviceType + "\n"
+                        + "- Durum: " + finalStatus + "\n\n"
+                        + "Onay icin evet, iptal icin hayir yaz."
         );
         pendingCommands.put(sessionKey, pending);
         return new ChatResponse(pending.confirmationText(), false);
@@ -271,7 +358,10 @@ public class AiAgentService {
 
         PendingCommand pending = PendingCommand.resolveAlarm(
                 alarmId,
-                "#" + alarmId + " numarali alarmi cozuldu olarak isaretleyeyim mi? Onay icin evet, iptal icin hayir yaz."
+                "Onay gerekiyor:\n"
+                        + "- Alarm: #" + alarmId + "\n"
+                        + "- Yeni durum: RESOLVED\n\n"
+                        + "Onay icin evet, iptal icin hayir yaz."
         );
         pendingCommands.put(sessionKey, pending);
         return new ChatResponse(pending.confirmationText(), false);
@@ -284,8 +374,8 @@ public class AiAgentService {
                                             GeminiFilters filters) {
         DeviceResolution resolution = resolveDevice(username, admin, actionResponse, filters);
         if (resolution.ambiguous()) {
-            return new ChatResponse("Birden fazla cihaz eslesti: " + summarizeDevices(resolution.matches())
-                    + ". Alarm olusturmak icin cihaz id ile yaz.", false);
+            return new ChatResponse("Birden fazla cihaz eslesti:\n" + summarizeDevices(resolution.matches())
+                    + "\n\nAlarm olusturmak icin cihaz id ile yaz.", false);
         }
         if (resolution.isNotFound()) {
             return new ChatResponse("Alarm olusturmak icin tek bir cihaz id veya adi gerekiyor.", false);
@@ -295,7 +385,7 @@ public class AiAgentService {
         String alarmType = allow(normalize(actionResponse.alarmType()), ALARM_TYPES);
         String severity = allow(normalize(actionResponse.severity()), ALARM_SEVERITIES);
         if (alarmType == null) {
-            return new ChatResponse("Alarm olusturmak icin alarm tipi gerekiyor: MOTION, TEMPERATURE veya CONNECTION.", false);
+            return new ChatResponse("Alarm olusturmak icin alarm tipi gerekiyor: MOTION, TEMPERATURE, CONNECTION veya FAILURE.", false);
         }
 
         String finalSeverity = severity == null ? "MEDIUM" : severity;
@@ -306,8 +396,12 @@ public class AiAgentService {
                 alarmType,
                 finalSeverity,
                 description,
-                "#" + device.getId() + " " + device.getName() + " icin " + finalSeverity + " onemde " + alarmType
-                        + " alarmi olusturayim mi? Onay icin evet, iptal icin hayir yaz."
+                "Onay gerekiyor:\n"
+                        + "- Cihaz: #" + device.getId() + " " + device.getName() + "\n"
+                        + "- Alarm tipi: " + alarmType + "\n"
+                        + "- Onem: " + finalSeverity + "\n"
+                        + "- Aciklama: " + description + "\n\n"
+                        + "Onay icin evet, iptal icin hayir yaz."
         );
         pendingCommands.put(sessionKey, pending);
         return new ChatResponse(pending.confirmationText(), false);
@@ -327,7 +421,7 @@ public class AiAgentService {
             return new ChatResponse("Cihaz bulunamadi.", true);
         }
 
-        return new ChatResponse(devices.size() + " cihaz bulundu: " + summarizeDevices(devices), true);
+        return new ChatResponse(devices.size() + " cihaz bulundu:\n" + summarizeDevices(devices), true);
     }
 
     private ChatResponse countDevices(String username, boolean admin, GeminiFilters filters) {
@@ -341,6 +435,140 @@ public class AiAgentService {
         return new ChatResponse("Cihaz sayisi: " + count + ".", true);
     }
 
+    private ChatResponse listUserDevices(String username, boolean admin, Long userId, Integer requestedLimit) {
+        Optional<UserResponse> requestedUser = visibleRequestedUser(username, admin, userId);
+        if (requestedUser.isEmpty()) {
+            return new ChatResponse("Bu kullanicinin cihazlarini goruntulemek icin admin yetkisi gerekiyor veya kullanici bulunamadi.", false);
+        }
+
+        List<DeviceResponse> devices = deviceService.getDevicesByUserId(userId)
+                .stream()
+                .limit(limit(requestedLimit))
+                .toList();
+        if (devices.isEmpty()) {
+            return new ChatResponse("#" + userId + " " + requestedUser.get().getUsername()
+                    + " kullanicisina atanmis cihaz bulunamadi.", true);
+        }
+
+        return new ChatResponse("#" + userId + " " + requestedUser.get().getUsername()
+                + " kullanicisinin " + devices.size() + " cihazi bulundu:\n" + summarizeDevices(devices), true);
+    }
+
+    private ChatResponse countUserDevices(String username, boolean admin, Long userId) {
+        Optional<UserResponse> requestedUser = visibleRequestedUser(username, admin, userId);
+        if (requestedUser.isEmpty()) {
+            return new ChatResponse("Bu kullanicinin cihazlarini saymak icin admin yetkisi gerekiyor veya kullanici bulunamadi.", false);
+        }
+
+        long count = deviceService.getDevicesByUserId(userId).size();
+        return new ChatResponse("#" + userId + " " + requestedUser.get().getUsername()
+                + " kullanicisinin cihaz sayisi: " + count + ".", true);
+    }
+
+    private Optional<UserResponse> visibleRequestedUser(String username, boolean admin, Long userId) {
+        if (userId == null) {
+            return Optional.empty();
+        }
+        try {
+            UserResponse user = userService.getUserById(userId);
+            return admin || username.equals(user.getUsername())
+                    ? Optional.of(user)
+                    : Optional.empty();
+        } catch (EntityNotFoundException exception) {
+            return Optional.empty();
+        }
+    }
+
+    private Long resolveUserDevicesUserId(String currentUsername,
+                                          String normalizedMessage,
+                                          AiActionResponse actionResponse) {
+        if (actionResponse.entityId() != null) {
+            return actionResponse.entityId();
+        }
+
+        Optional<UserResponse> userFromEntityName = findUserByExactUsername(actionResponse.entityName());
+        if (userFromEntityName.isPresent()) {
+            return userFromEntityName.get().getId();
+        }
+
+        Optional<UserResponse> userFromMessage = findUserMentionedInMessage(normalizedMessage);
+        if (userFromMessage.isPresent()) {
+            return userFromMessage.get().getId();
+        }
+
+        if (isSelfUserDevicesQuery(normalizedMessage)) {
+            return userService.findUserByUsername(currentUsername)
+                    .map(UserResponse::getId)
+                    .orElse(null);
+        }
+        return null;
+    }
+
+    private Optional<UserResponse> findUserByExactUsername(String username) {
+        String normalizedUsername = normalizeText(username);
+        if (normalizedUsername.isBlank()) {
+            return Optional.empty();
+        }
+        return userService.getAllUsers()
+                .stream()
+                .filter(user -> normalizedUsername.equals(normalizeText(user.getUsername())))
+                .findFirst();
+    }
+
+    private Optional<UserResponse> findUserMentionedInMessage(String normalizedMessage) {
+        if (normalizedMessage == null || normalizedMessage.isBlank()) {
+            return Optional.empty();
+        }
+        return userService.getAllUsers()
+                .stream()
+                .sorted(Comparator.comparingInt((UserResponse user) -> normalizeText(user.getUsername()).length()).reversed())
+                .filter(user -> containsUsernameMention(normalizedMessage, user.getUsername()))
+                .findFirst();
+    }
+
+    private boolean containsUsernameMention(String normalizedMessage, String username) {
+        String normalizedUsername = normalizeText(username);
+        if (normalizedUsername.isBlank()) {
+            return false;
+        }
+        if (containsToken(normalizedMessage, normalizedUsername)) {
+            return true;
+        }
+
+        String softenedUsername = softenFinalConsonant(normalizedUsername);
+        for (String stem : List.of(normalizedUsername, softenedUsername)) {
+            for (String suffix : List.of("in", "nin", "un", "nun")) {
+                if (containsToken(normalizedMessage, stem + suffix)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private String softenFinalConsonant(String username) {
+        if (username.endsWith("k")) {
+            return username.substring(0, username.length() - 1) + "g";
+        }
+        if (username.endsWith("p")) {
+            return username.substring(0, username.length() - 1) + "b";
+        }
+        if (username.endsWith("t")) {
+            return username.substring(0, username.length() - 1) + "d";
+        }
+        return username;
+    }
+
+    private boolean containsToken(String text, String token) {
+        return Pattern.compile("(^|[^a-z0-9._-])" + Pattern.quote(token) + "([^a-z0-9._-]|$)")
+                .matcher(text)
+                .find();
+    }
+
+    private boolean isSelfUserDevicesQuery(String text) {
+        return containsAny(text, "benim cihaz", "cihazlarim", "cihazlarimi", "kendi cihaz", "my devices");
+    }
+
     private ChatResponse deviceDetail(String username, boolean admin, GeminiFilters filters) {
         String nameContains = filters.getNameContains();
         if (nameContains == null || nameContains.isBlank()) {
@@ -349,13 +577,182 @@ public class AiAgentService {
 
         return deviceService.getDeviceDetail(username, admin, nameContains)
                 .map(device -> new ChatResponse(
-                        "Cihaz detayi: " + device.getName()
-                                + ", durum: " + device.getStatus()
-                                + ", tip: " + device.getDeviceType()
-                                + ", konum: " + valueOrDash(device.getLocation()) + ".",
+                        "Cihaz detayi:\n"
+                                + "- Ad: " + device.getName() + "\n"
+                                + "- Durum: " + device.getStatus() + "\n"
+                                + "- Tip: " + device.getDeviceType() + "\n"
+                                + "- Konum: " + valueOrDash(device.getLocation()),
                         true
                 ))
                 .orElseGet(() -> new ChatResponse("Bu isimle gorulebilir cihaz bulunamadi.", true));
+    }
+
+    private Optional<ChatResponse> answerReferencedDetail(String username,
+                                                          boolean admin,
+                                                          String currentMessage,
+                                                          String lastAssistantMessage) {
+        String text = normalizeText(currentMessage);
+        if (!isOrdinalDetailRequest(text)) {
+            return Optional.empty();
+        }
+
+        List<ReferencedListItem> items = referencedListItems(lastAssistantMessage);
+        if (items.isEmpty()) {
+            return Optional.empty();
+        }
+
+        Integer index = referencedItemIndex(text, items.size());
+        if (index == null || index < 0 || index >= items.size()) {
+            return Optional.empty();
+        }
+
+        ReferencedListItem item = items.get(index);
+        log.info("Conversation reference resolved. type={}, ordinal={}, id={}", item.type(), index + 1, item.id());
+        return switch (item.type()) {
+            case ALARM -> Optional.of(alarmDetail(username, admin, item.id()));
+            case DEVICE -> Optional.of(deviceDetailById(username, admin, item.id()));
+        };
+    }
+
+    private boolean isOrdinalDetailRequest(String text) {
+        if (!containsAny(text, "detay", "detayi", "detayini", "ayrinti", "ayrintisi", "bilgi", "bilgisi")) {
+            return false;
+        }
+        return referencedItemIndex(text, 10) != null;
+    }
+
+    private Integer referencedItemIndex(String text, int itemCount) {
+        if (containsAny(text, "sonuncu", "sonuncusu", "sonuncusunun")) {
+            return Math.max(0, itemCount - 1);
+        }
+        if (containsAny(text, "birinci", "birincisi", "birincisinin", "ilk", "ilki", "ilkinin")
+                || Pattern.compile("(^|\\D)1(\\.|\\D|$)").matcher(text).find()) {
+            return 0;
+        }
+        if (containsAny(text, "ikinci", "ikincisi", "ikincisinin")
+                || Pattern.compile("(^|\\D)2(\\.|\\D|$)").matcher(text).find()) {
+            return 1;
+        }
+        if (containsAny(text, "ucuncu", "ucuncusu", "ucuncusunun")
+                || Pattern.compile("(^|\\D)3(\\.|\\D|$)").matcher(text).find()) {
+            return 2;
+        }
+        if (containsAny(text, "dorduncu", "dorduncusu", "dorduncusunun")
+                || Pattern.compile("(^|\\D)4(\\.|\\D|$)").matcher(text).find()) {
+            return 3;
+        }
+        if (containsAny(text, "besinci", "besincisi", "besincisinin")
+                || Pattern.compile("(^|\\D)5(\\.|\\D|$)").matcher(text).find()) {
+            return 4;
+        }
+        return null;
+    }
+
+    private List<ReferencedListItem> referencedListItems(String lastAssistantMessage) {
+        if (lastAssistantMessage == null || lastAssistantMessage.isBlank()) {
+            return List.of();
+        }
+
+        Matcher matcher = Pattern.compile("(?m)^\\s*-?\\s+#(\\d+)\\s+(.+)$").matcher(lastAssistantMessage);
+        List<ReferencedListItem> items = new java.util.ArrayList<>();
+        while (matcher.find()) {
+            Long id = parseLong(matcher.group(1));
+            if (id == null) {
+                continue;
+            }
+            String line = matcher.group(0);
+            ReferencedItemType type = line.contains("[cihaz #") ? ReferencedItemType.ALARM : ReferencedItemType.DEVICE;
+            items.add(new ReferencedListItem(type, id));
+        }
+        return items;
+    }
+
+    private ChatResponse alarmDetail(String username, boolean admin, Long alarmId) {
+        if (alarmId == null) {
+            return unknown();
+        }
+        return alarmService.getAlarmDetail(username, admin, alarmId)
+                .map(alarm -> new ChatResponse(
+                        "Alarm detayi:\n"
+                                + "- Id: #" + alarm.getId() + "\n"
+                                + "- Cihaz: #" + alarm.getDeviceId() + " " + alarm.getDeviceName() + "\n"
+                                + "- Tip: " + valueOrDash(alarm.getAlarmType()) + "\n"
+                                + "- Onem: " + valueOrDash(alarm.getSeverity()) + "\n"
+                                + "- Durum: " + alarmStatus(alarm) + "\n"
+                                + "- Zaman: " + formatDateTime(alarm.getOccurredAt()) + "\n"
+                                + "- Cozulme: " + formatDateTime(alarm.getResolvedAt()) + "\n"
+                                + "- Aciklama: " + valueOrDash(alarm.getDescription()),
+                        true
+                ))
+                .orElseGet(() -> new ChatResponse("Bu alarmi goruntulemek icin yetkin yok veya alarm bulunamadi.", false));
+    }
+
+    private ChatResponse deviceDetailById(String username, boolean admin, Long deviceId) {
+        if (deviceId == null) {
+            return unknown();
+        }
+        return deviceService.getDeviceDetail(username, admin, String.valueOf(deviceId))
+                .map(device -> new ChatResponse(
+                        "Cihaz detayi:\n"
+                                + "- Id: #" + device.getId() + "\n"
+                                + "- Ad: " + device.getName() + "\n"
+                                + "- Durum: " + device.getStatus() + "\n"
+                                + "- Tip: " + device.getDeviceType() + "\n"
+                                + "- Konum: " + valueOrDash(device.getLocation()),
+                        true
+                ))
+                .orElseGet(() -> new ChatResponse("Bu cihazi goruntulemek icin yetkin yok veya cihaz bulunamadi.", false));
+    }
+
+    private Optional<ChatResponse> answerDeviceAlarms(String username, boolean admin, String currentMessage) {
+        String text = normalizeText(currentMessage);
+        if (!isDeviceAlarmQuery(text)) {
+            return Optional.empty();
+        }
+
+        Long deviceId = extractFirstNumber(text);
+        if (deviceId == null) {
+            return Optional.empty();
+        }
+
+        GeminiFilters filters = new GeminiFilters();
+        filters.setDateRange(detectDateRange(text));
+        filters.setStatus(detectAlarmStatus(text));
+
+        if (containsAny(text, "kac", "sayisi", "sayi", "adet", "toplam")) {
+            long count = alarmService.countAlarmsByDeviceId(
+                    username,
+                    admin,
+                    deviceId,
+                    filters.getStatus(),
+                    filters.getDateRange(),
+                    filters.getStartDate(),
+                    filters.getEndDate()
+            );
+            return Optional.of(new ChatResponse("#" + deviceId + " cihazinin alarm sayisi: " + count + ".", true));
+        }
+
+        List<AlarmResponse> alarms = alarmService.listAlarmsByDeviceId(
+                username,
+                admin,
+                deviceId,
+                filters.getStatus(),
+                filters.getDateRange(),
+                filters.getStartDate(),
+                filters.getEndDate(),
+                limit(detectLimit(text, DEFAULT_LIMIT))
+        );
+
+        if (alarms.isEmpty()) {
+            return Optional.of(new ChatResponse("#" + deviceId + " cihazina ait gorulebilir alarm bulunamadi.", true));
+        }
+        return Optional.of(new ChatResponse("#" + deviceId + " cihazinin " + alarms.size()
+                + " alarmi bulundu:\n" + summarizeAlarms(alarms), true));
+    }
+
+    private boolean isDeviceAlarmQuery(String text) {
+        return containsAny(text, "cihaz", "cihazin", "cihazın", "device")
+                && containsAny(text, "alarm", "alarmlar", "alarmlari", "alarmlarini", "alarmlarını");
     }
 
     private ChatResponse listAlarms(String username, boolean admin, GeminiFilters filters, Integer requestedLimit) {
@@ -373,7 +770,7 @@ public class AiAgentService {
             return new ChatResponse(datePrefix(filters) + "alarm bulunamadi.", true);
         }
 
-        return new ChatResponse(alarms.size() + " alarm bulundu: " + summarizeAlarms(alarms), true);
+        return new ChatResponse(alarms.size() + " alarm bulundu:\n" + summarizeAlarms(alarms), true);
     }
 
     private ChatResponse countAlarms(String username, boolean admin, GeminiFilters filters) {
@@ -403,7 +800,7 @@ public class AiAgentService {
             return new ChatResponse("Gruplanacak alarm bulunamadi.", true);
         }
 
-        return new ChatResponse("Alarm dagilimi: " + summarizeGroups(groups), true);
+        return new ChatResponse("Alarm dagilimi:\n" + summarizeGroups(groups), true);
     }
 
     private ChatResponse topAlarmGroups(String username,
@@ -432,7 +829,7 @@ public class AiAgentService {
         if (groups.size() == 1) {
             return new ChatResponse("En cok alarm veren grup: " + first.key() + ", alarm sayisi: " + first.count() + ".", true);
         }
-        return new ChatResponse("En cok alarm veren gruplar: " + summarizeGroups(groups), true);
+        return new ChatResponse("En cok alarm veren gruplar:\n" + summarizeGroups(groups), true);
     }
 
     private ChatResponse averageAlarmCounts(String username, boolean admin, GeminiFilters filters) {
@@ -507,6 +904,14 @@ public class AiAgentService {
                 || "COUNT".equals(metric);
     }
 
+    private boolean isUserDevicesRequest(AiActionResponse actionResponse) {
+        if (actionResponse == null) {
+            return false;
+        }
+        String target = normalize(actionResponse.target());
+        return "USER_DEVICES".equals(target) || "USER_DEVICE".equals(target);
+    }
+
     private Optional<ChatResponse> answerPendingCommand(String sessionKey, String username, boolean admin, String message) {
         PendingCommand pending = pendingCommands.get(sessionKey);
         if (pending == null) {
@@ -524,7 +929,7 @@ public class AiAgentService {
         }
 
         return Optional.of(new ChatResponse(
-                "Bekleyen bir islem var: " + pending.confirmationText() + " Devam etmek icin evet veya hayir yaz.",
+                "Bekleyen bir islem var:\n" + pending.confirmationText() + "\n\nDevam etmek icin evet veya hayir yaz.",
                 false
         ));
     }
@@ -605,6 +1010,33 @@ public class AiAgentService {
     }
 
     private AiActionResponse fallbackCommandAction(String text) {
+        if (isDeviceCreateRequest(text)) {
+            GeminiFilters filters = new GeminiFilters();
+            String deviceType = detectDeviceType(text);
+            String status = detectDeviceStatus(text);
+            String entityName = extractDeviceCreateName(text);
+            filters.setDeviceType(deviceType);
+            filters.setStatus(status);
+            filters.setNameContains(entityName);
+
+            return new AiActionResponse(
+                    ActionType.DEVICE_COMMAND,
+                    OperationType.CREATE,
+                    "device",
+                    null,
+                    null,
+                    filters,
+                    null,
+                    null,
+                    entityName,
+                    status,
+                    deviceType,
+                    null,
+                    null,
+                    null
+            );
+        }
+
         if (isAlarmQuery(text) && containsAny(text, "coz", "cozuldu", "cozulmus yap", "kapat")) {
             Long alarmId = extractFirstNumber(text);
             if (alarmId == null) {
@@ -668,7 +1100,14 @@ public class AiAgentService {
                 detectAlarmGroupBy(text, operation),
                 operation == OperationType.COUNT || operation == OperationType.TOP_N ? "alarm_count" : null,
                 filters,
-                operation == OperationType.COUNT ? null : detectLimit(text, operation == OperationType.TOP_N ? 1 : DEFAULT_LIMIT)
+                operation == OperationType.COUNT ? null : detectLimit(text, operation == OperationType.TOP_N ? 1 : DEFAULT_LIMIT),
+                operation == OperationType.DETAIL ? extractFirstNumber(text) : null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
         );
     }
 
@@ -679,20 +1118,67 @@ public class AiAgentService {
         filters.setNameContains(detectDeviceName(text));
 
         OperationType operation = detectDeviceOperation(text);
+        Long userId = detectUserDevicesUserId(text);
         return new AiActionResponse(
                 ActionType.DEVICE_QUERY,
                 operation,
-                "devices",
+                userId == null ? "devices" : "user_devices",
                 null,
                 operation == OperationType.COUNT ? "device_count" : null,
                 filters,
-                operation == OperationType.COUNT ? null : detectLimit(text, DEFAULT_LIMIT)
+                operation == OperationType.COUNT ? null : detectLimit(text, DEFAULT_LIMIT),
+                userId,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
         );
+    }
+
+    private Optional<AiActionResponse> userDevicesAction(String text) {
+        if (!text.contains("cihaz") && !text.contains("device")) {
+            return Optional.empty();
+        }
+        if (!text.contains("kullan") && !text.contains("user")) {
+            return Optional.empty();
+        }
+
+        Long userId = extractFirstNumber(text);
+        if (userId == null) {
+            return Optional.empty();
+        }
+
+        OperationType operation = detectDeviceOperation(text);
+        if (operation != OperationType.COUNT) {
+            operation = OperationType.LIST;
+        }
+
+        return Optional.of(new AiActionResponse(
+                ActionType.DEVICE_QUERY,
+                operation,
+                "user_devices",
+                null,
+                operation == OperationType.COUNT ? "device_count" : null,
+                new GeminiFilters(),
+                operation == OperationType.COUNT ? null : detectLimit(text, DEFAULT_LIMIT),
+                userId,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+        ));
     }
 
     private OperationType detectAlarmOperation(String text) {
         if (containsAny(text, "en cok", "top", "ilk siradaki")) {
             return OperationType.TOP_N;
+        }
+        if (containsAny(text, "detay", "detayi", "detayini", "ayrinti", "ayrintisi", "bilgi", "bilgisi")) {
+            return OperationType.DETAIL;
         }
         if (containsAny(
                 text,
@@ -792,12 +1278,57 @@ public class AiAgentService {
         if (containsAny(text, "jenerator", "generator")) {
             return "GENERATOR";
         }
+        if (containsAny(text, "termostat", "thermostat")) {
+            return "THERMOSTAT";
+        }
         return null;
     }
 
     private String detectDeviceName(String text) {
         Matcher matcher = Pattern.compile("\\b(?:adi|ismi|isim)\\s+([a-z0-9_-]{2,40})\\b").matcher(text);
         return matcher.find() ? matcher.group(1) : null;
+    }
+
+    private String extractDeviceCreateName(String text) {
+        Matcher quoted = Pattern.compile("\"([^\"]{2,80})\"").matcher(text);
+        if (quoted.find()) {
+            return cleanDeviceCreateName(quoted.group(1));
+        }
+
+        Matcher nameAfterKeyword = Pattern.compile("\\b(?:adi|ismi|isim)\\s+([a-z0-9 ._-]{2,80})").matcher(text);
+        if (nameAfterKeyword.find()) {
+            return cleanDeviceCreateName(nameAfterKeyword.group(1));
+        }
+
+        Matcher namedDevice = Pattern.compile("\\b([a-z0-9 ._-]{2,80})\\s+(?:adli|isimli)\\s+(?:cihaz|kamera|sensor|gateway|ups|jenerator|generator|termostat|thermostat)\\b").matcher(text);
+        if (namedDevice.find()) {
+            return cleanDeviceCreateName(namedDevice.group(1));
+        }
+
+        return null;
+    }
+
+    private String cleanDeviceCreateName(String value) {
+        if (value == null) {
+            return null;
+        }
+        String cleaned = value
+                .replaceFirst("\\b(tipi|turu|tur|durumu|durum|aktif|pasif|bakim|active|passive|maintenance|cihaz|kamera|sensor|gateway|ups|jenerator|generator|termostat|thermostat|ekle|olustur|kaydet|tanimla)\\b.*$", "")
+                .replaceAll("\\s+", " ")
+                .trim();
+        return cleaned.length() < 2 ? null : cleaned;
+    }
+
+    private Long detectUserDevicesUserId(String text) {
+        if (!isUserDevicesQuery(text)) {
+            return null;
+        }
+        return extractFirstNumber(text);
+    }
+
+    private boolean isUserDevicesQuery(String text) {
+        return containsAny(text, "cihaz", "device")
+                && containsAny(text, "kullanic", "user");
     }
 
     private Integer detectLimit(String text, int fallback) {
@@ -817,7 +1348,11 @@ public class AiAgentService {
     }
 
     private boolean isDeviceQuery(String text) {
-        return containsAny(text, "cihaz", "cihazlar", "cihazlari", "kamera", "sensor", "gateway", "ups", "jenerator");
+        return containsAny(text, "cihaz", "cihazlar", "cihazlari", "kamera", "sensor", "gateway", "ups", "jenerator", "termostat");
+    }
+
+    private boolean isDeviceCreateRequest(String text) {
+        return isDeviceQuery(text) && containsAny(text, "olustur", "ekle", "kaydet", "tanimla", "create");
     }
 
     private boolean isGeneralHelpQuestion(String text) {
@@ -928,8 +1463,15 @@ public class AiAgentService {
         if (!matcher.find()) {
             return null;
         }
+        return parseLong(matcher.group(1));
+    }
+
+    private Long parseLong(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
         try {
-            return Long.parseLong(matcher.group(1));
+            return Long.parseLong(value.trim());
         } catch (NumberFormatException exception) {
             return null;
         }
@@ -1095,14 +1637,21 @@ public class AiAgentService {
 
     private ChatResponse generalQuestion() {
         return new ChatResponse(
-                "Cihazlari ve alarmlari listeleyebilir, sayabilir, gruplayabilir ve alarm sayilari uzerinde basit hesaplamalar yapabilirim. Ornek: son 10 alarmi listele, aktif cihazlari getir, hangi cihazlarda alarm var.",
+                "Cihazlari ve alarmlari listeleyebilir, sayabilir, gruplayabilir ve alarm sayilari uzerinde basit hesaplamalar yapabilirim.\n\n"
+                        + "Ornekler:\n"
+                        + "- son 10 alarmi listele\n"
+                        + "- aktif cihazlari getir\n"
+                        + "- hangi cihazlarda alarm var",
                 true
         );
     }
 
     private ChatResponse greeting() {
         return new ChatResponse(
-                "Merhaba. Cihazlar ve alarmlar hakkinda soru sorabilirsin. Ornek: son 10 alarmi listele veya aktif cihazlari getir.",
+                "Merhaba. Cihazlar ve alarmlar hakkinda soru sorabilirsin.\n\n"
+                        + "Ornekler:\n"
+                        + "- son 10 alarmi listele\n"
+                        + "- aktif cihazlari getir",
                 true
         );
     }
@@ -1133,22 +1682,39 @@ public class AiAgentService {
 
     private String summarizeDevices(List<DeviceResponse> devices) {
         return devices.stream()
-                .map(device -> "#" + device.getId() + " " + device.getName() + " (" + device.getStatus() + ")")
-                .collect(Collectors.joining(", "));
+                .map(device -> "- #" + device.getId() + " " + device.getName()
+                        + " | Durum: " + valueOrDash(device.getStatus())
+                        + " | Tip: " + valueOrDash(device.getDeviceType())
+                        + " | Konum: " + valueOrDash(device.getLocation()))
+                .collect(Collectors.joining("\n"));
     }
 
     private String summarizeAlarms(List<AlarmResponse> alarms) {
         return alarms.stream()
-                .map(alarm -> "#" + alarm.getId() + " "
-                        + alarm.getDeviceName() + " [cihaz #" + alarm.getDeviceId() + "] - "
-                        + alarm.getAlarmType() + " (" + alarm.getSeverity() + ")")
-                .collect(Collectors.joining(", "));
+                .map(alarm -> "- #" + alarm.getId() + " " + alarm.getDeviceName()
+                        + " [cihaz #" + alarm.getDeviceId() + "]"
+                        + " | Tip: " + valueOrDash(alarm.getAlarmType())
+                        + " | Onem: " + valueOrDash(alarm.getSeverity())
+                        + " | Durum: " + alarmStatus(alarm)
+                        + " | Zaman: " + formatDateTime(alarm.getOccurredAt()))
+                .collect(Collectors.joining("\n"));
     }
 
     private String summarizeGroups(List<GroupCount> groups) {
         return groups.stream()
-                .map(group -> group.key() + ": " + group.count())
-                .collect(Collectors.joining(", "));
+                .map(group -> "- " + valueOrDash(group.key()) + ": " + group.count())
+                .collect(Collectors.joining("\n"));
+    }
+
+    private String alarmStatus(AlarmResponse alarm) {
+        return alarm.getResolvedAt() == null ? "UNRESOLVED" : "RESOLVED";
+    }
+
+    private String formatDateTime(OffsetDateTime value) {
+        if (value == null) {
+            return "-";
+        }
+        return value.atZoneSameInstant(APP_ZONE).format(DATE_TIME_FORMATTER);
     }
 
     private String datePrefix(GeminiFilters filters) {
@@ -1177,14 +1743,14 @@ public class AiAgentService {
         if (value == null || value.isBlank()) {
             return null;
         }
-        return value.toUpperCase(Locale.forLanguageTag("tr-TR")).trim();
+        return value.toUpperCase(Locale.ROOT).trim();
     }
 
     private String normalizeText(String value) {
         if (value == null || value.isBlank()) {
             return "";
         }
-        String lower = value.toLowerCase(Locale.forLanguageTag("tr-TR")).replace('ı', 'i');
+        String lower = value.toLowerCase(Locale.forLanguageTag("tr-TR")).replace('\u0131', 'i');
         return Normalizer.normalize(lower, Normalizer.Form.NFD)
                 .replaceAll("\\p{M}+", "")
                 .trim();
@@ -1222,6 +1788,14 @@ public class AiAgentService {
         private boolean isNotFound() {
             return device == null && matches.isEmpty();
         }
+    }
+
+    private enum ReferencedItemType {
+        ALARM,
+        DEVICE
+    }
+
+    private record ReferencedListItem(ReferencedItemType type, Long id) {
     }
 
     private enum PendingCommandType {

@@ -39,13 +39,18 @@ public class UserController {
     }
 
     @GetMapping
-    public List<UserResponse> getAllUsers() {
-        return userService.getAllUsers();
+    public List<UserResponse> getAllUsers(Authentication authentication) {
+        if (isAdmin(authentication)) {
+            return userService.getAllUsers();
+        }
+        return userService.findUserByUsername(authentication.getName())
+                .map(List::of)
+                .orElse(List.of());
     }
 
     @GetMapping("/{id}")
-    public UserResponse getUserById(@PathVariable Long id) {
-        return userService.getUserById(id);
+    public UserResponse getUserById(@PathVariable Long id, Authentication authentication) {
+        return userService.getVisibleUserById(authentication.getName(), isAdmin(authentication), id);
     }
 
     @DeleteMapping("/{id}")
@@ -61,8 +66,8 @@ public class UserController {
     }
 
     @GetMapping("/{userId}/devices")
-    public List<DeviceResponse> getUserDevices(@PathVariable Long userId) {
-        userService.getUserById(userId);
+    public List<DeviceResponse> getUserDevices(@PathVariable Long userId, Authentication authentication) {
+        userService.getVisibleUserById(authentication.getName(), isAdmin(authentication), userId);
         return deviceService.getDevicesByUserId(userId);
     }
 
@@ -70,5 +75,11 @@ public class UserController {
     public ResponseEntity<Void> removeDevice(@PathVariable Long userId, @PathVariable Long deviceId) {
         userService.removeDevice(userId, deviceId);
         return ResponseEntity.noContent().build();
+    }
+
+    private boolean isAdmin(Authentication authentication) {
+        return authentication.getAuthorities()
+                .stream()
+                .anyMatch(authority -> "ROLE_ADMIN".equals(authority.getAuthority()));
     }
 }

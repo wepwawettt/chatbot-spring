@@ -29,6 +29,11 @@ const elements = {
     deviceCount: document.querySelector("#deviceCount"),
     activeDeviceCount: document.querySelector("#activeDeviceCount"),
     alarmCount: document.querySelector("#alarmCount"),
+    userMetricLabel: document.querySelector("#userMetricLabel"),
+    deviceMetricLabel: document.querySelector("#deviceMetricLabel"),
+    usersPanelTitle: document.querySelector("#usersPanelTitle"),
+    devicesPanelTitle: document.querySelector("#devicesPanelTitle"),
+    userDevicesPanelTitle: document.querySelector("#userDevicesPanelTitle"),
     usersTable: document.querySelector("#usersTable"),
     devicesTable: document.querySelector("#devicesTable"),
     userDevicesTable: document.querySelector("#userDevicesTable"),
@@ -43,12 +48,17 @@ const elements = {
     assignUserSelect: document.querySelector("#assignUserSelect"),
     assignDeviceSelect: document.querySelector("#assignDeviceSelect"),
     userDevicesSelect: document.querySelector("#userDevicesSelect"),
-    alarmsDeviceSelect: document.querySelector("#alarmsDeviceSelect")
+    alarmsDeviceSelect: document.querySelector("#alarmsDeviceSelect"),
+    formsPanelTitle: document.querySelector("#formsPanelTitle")
 };
 
 document.addEventListener("DOMContentLoaded", () => {
     bindEvents();
     boot();
+});
+
+window.addEventListener("pagehide", () => {
+    cleanupChatHistory(true);
 });
 
 function bindEvents() {
@@ -124,17 +134,47 @@ async function loadCurrentUser() {
 }
 
 function logout() {
+    cleanupChatHistory(false);
+    resetLocalSession();
+}
+
+function resetLocalSession() {
     sessionStorage.removeItem("authToken");
     state.authToken = "";
     state.currentUser = null;
     state.users = [];
     state.devices = [];
     state.alarms = [];
+    state.selectedUserId = "";
+    state.selectedAlarmDeviceId = "";
     state.chatEntries = [];
     showLogin();
 }
 
+async function cleanupChatHistory(keepalive, token = state.authToken) {
+    if (!token) {
+        return;
+    }
+
+    try {
+        await fetch("/api/chat/conversations", {
+            method: "DELETE",
+            headers: {
+                Authorization: `Basic ${token}`
+            },
+            keepalive
+        });
+    } catch {
+        // Page close cleanup is best-effort; the next login can still continue normally.
+    }
+
+    state.chatEntries = [];
+    state.chatConversationId = newConversationId();
+    sessionStorage.setItem("chatConversationId", state.chatConversationId);
+}
+
 function showLogin() {
+    document.body.classList.remove("role-admin", "role-user");
     elements.loginPanel.classList.remove("hidden");
     elements.appContent.classList.add("hidden");
     elements.currentUser.classList.add("hidden");
@@ -163,17 +203,26 @@ function canDeleteUser(user) {
 }
 
 function applyRoleUi() {
+    const admin = isAdmin();
     const adminOnlyTabs = new Set(["userFormPanel", "deviceFormPanel", "assignFormPanel"]);
+    document.body.classList.toggle("role-admin", admin);
+    document.body.classList.toggle("role-user", !admin);
 
     document.querySelectorAll(".tab").forEach((tab) => {
-        tab.classList.toggle("hidden", adminOnlyTabs.has(tab.dataset.tab) && !isAdmin());
+        tab.classList.toggle("hidden", adminOnlyTabs.has(tab.dataset.tab) && !admin);
     });
 
-    if (!isAdmin()) {
+    if (!admin) {
         activateTab("alarmFormPanel");
     }
 
-    elements.swaggerLink.classList.toggle("hidden", !isAdmin());
+    elements.formsPanelTitle.textContent = admin ? "Kayit islemleri" : "Alarm islemleri";
+    elements.userMetricLabel.textContent = admin ? "Kullanicilar" : "Profil";
+    elements.deviceMetricLabel.textContent = admin ? "Cihazlar" : "Cihazlarim";
+    elements.usersPanelTitle.textContent = admin ? "Kullanicilar" : "Profil";
+    elements.devicesPanelTitle.textContent = admin ? "Cihazlar" : "Cihazlarim";
+    elements.userDevicesPanelTitle.textContent = admin ? "Kullanici cihazlari" : "Cihaz atamalari";
+    elements.swaggerLink.classList.toggle("hidden", !admin);
 }
 
 async function loadDashboard() {
@@ -188,12 +237,7 @@ async function loadDashboard() {
         state.users = users;
         state.devices = devices;
 
-        if (!state.selectedUserId && users.length > 0) {
-            state.selectedUserId = String(users[0].id);
-        }
-        if (!state.selectedAlarmDeviceId && devices.length > 0) {
-            state.selectedAlarmDeviceId = String(devices[0].id);
-        }
+        syncSelections(users, devices);
 
         state.alarms = await loadAllAlarms(devices);
 
@@ -202,6 +246,22 @@ async function loadDashboard() {
     } catch (error) {
         setApiStatus("Baglanti yok");
         showToast(error.message, true);
+    }
+}
+
+function syncSelections(users, devices) {
+    const selectedUserVisible = users.some((user) => String(user.id) === String(state.selectedUserId));
+    const selectedAlarmDeviceVisible = devices.some((device) => String(device.id) === String(state.selectedAlarmDeviceId));
+
+    if (!isAdmin()) {
+        const currentUser = users.find((user) => String(user.id) === String(state.currentUser?.id));
+        state.selectedUserId = currentUser ? String(currentUser.id) : (users[0] ? String(users[0].id) : "");
+    } else if (!selectedUserVisible) {
+        state.selectedUserId = users[0] ? String(users[0].id) : "";
+    }
+
+    if (!selectedAlarmDeviceVisible) {
+        state.selectedAlarmDeviceId = devices[0] ? String(devices[0].id) : "";
     }
 }
 
@@ -214,10 +274,122 @@ function renderChatMessages() {
     elements.chatMessages.innerHTML = state.chatEntries.map((message) => `
         <div class="chat-bubble user">${escapeHtml(message.userMessage)}</div>
         <div class="chat-bubble assistant ${message.pending ? "pending" : ""}">
-            ${escapeHtml(message.assistantMessage)}
+            ${renderAssistantMessage(message.assistantMessage)}
         </div>
     `).join("");
     elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
+}
+
+function renderAssistantMessage(value) {
+    if (value && typeof value === "object") {
+        return renderAssistantValue(value);
+    }
+
+    const text = String(value ?? "").trim();
+    const parsedJson = parseJsonText(text);
+    if (parsedJson !== undefined) {
+        return renderAssistantValue(parsedJson);
+    }
+
+    return renderTextAnswer(text);
+}
+
+function renderAssistantValue(value) {
+    const readableText = value?.answer ?? value?.message ?? value?.error;
+    if (typeof readableText === "string") {
+        return renderTextAnswer(readableText);
+    }
+
+    return renderJsonValue(value);
+}
+
+function renderTextAnswer(text) {
+    if (!text) {
+        return "";
+    }
+
+    return text
+        .split(/\n{2,}/)
+        .map((section) => section.trim())
+        .filter(Boolean)
+        .map(renderTextSection)
+        .join("");
+}
+
+function renderTextSection(section) {
+    const lines = section
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+    let html = "";
+    let listItems = [];
+
+    const flushList = () => {
+        if (listItems.length === 0) {
+            return;
+        }
+        html += `<ul class="answer-list">${listItems.map((item) => `<li>${formatInlineText(item)}</li>`).join("")}</ul>`;
+        listItems = [];
+    };
+
+    lines.forEach((line) => {
+        if (/^[-*]\s+/.test(line)) {
+            listItems.push(line.replace(/^[-*]\s+/, ""));
+            return;
+        }
+
+        flushList();
+        html += `<p>${formatInlineText(line)}</p>`;
+    });
+
+    flushList();
+    return html;
+}
+
+function renderJsonValue(value) {
+    if (Array.isArray(value)) {
+        if (value.length === 0) {
+            return `<p>Kayit yok.</p>`;
+        }
+        return `<ul class="answer-list">${value.map((item) => `<li>${renderJsonValue(item)}</li>`).join("")}</ul>`;
+    }
+
+    if (value && typeof value === "object") {
+        const entries = Object.entries(value);
+        if (entries.length === 0) {
+            return `<p>Kayit yok.</p>`;
+        }
+        return `<dl class="answer-fields">${entries.map(([key, item]) => `
+            <dt>${escapeHtml(humanizeKey(key))}</dt>
+            <dd>${renderJsonValue(item)}</dd>
+        `).join("")}</dl>`;
+    }
+
+    return `<span>${formatInlineText(String(value ?? "-"))}</span>`;
+}
+
+function parseJsonText(text) {
+    if (!text || !/^\s*[\[{]/.test(text)) {
+        return undefined;
+    }
+
+    try {
+        return JSON.parse(text);
+    } catch {
+        return undefined;
+    }
+}
+
+function formatInlineText(value) {
+    return escapeHtml(value).replace(/^([^:]{2,48}:)(\s*)/, "<strong>$1</strong>$2");
+}
+
+function humanizeKey(value) {
+    const label = String(value ?? "")
+        .replace(/([a-z])([A-Z])/g, "$1 $2")
+        .replaceAll("_", " ")
+        .trim();
+    return label ? label.charAt(0).toUpperCase() + label.slice(1) : "-";
 }
 
 async function sendChatMessage(event) {
@@ -241,6 +413,10 @@ async function sendChatMessage(event) {
                 conversationId: state.chatConversationId
             }
         });
+        if (response.conversationId) {
+            state.chatConversationId = response.conversationId;
+            sessionStorage.setItem("chatConversationId", state.chatConversationId);
+        }
         entry.assistantMessage = response.answer || "Bu istegi guvenli sekilde anlayamadim.";
         entry.pending = false;
         renderChatMessages();
@@ -279,7 +455,11 @@ function renderAll() {
     renderSelects();
     renderUsers();
     renderDevices();
-    renderUserDevices();
+    if (isAdmin()) {
+        renderUserDevices();
+    } else {
+        elements.userDevicesTable.innerHTML = "";
+    }
     renderAlarms();
 }
 
@@ -324,9 +504,17 @@ function renderOptions(select, items, emptyText, labelFn) {
 
 function renderUsers() {
     if (state.users.length === 0) {
-        renderEmpty(elements.usersTable, 5, "Kayitli kullanici yok");
+        renderEmpty(elements.usersTable, isAdmin() ? 5 : 4, "Kayitli kullanici yok");
         return;
     }
+
+    const actionCell = (user) => isAdmin() ? `
+            <td class="admin-action-col">
+                <div class="row-actions ${canDeleteUser(user) ? "" : "hidden"}">
+                    <button class="danger-button" type="button" data-action="delete-user" data-id="${user.id}">Sil</button>
+                </div>
+            </td>
+    ` : "";
 
     elements.usersTable.innerHTML = state.users.map((user) => `
         <tr>
@@ -334,11 +522,7 @@ function renderUsers() {
             <td>${escapeHtml(user.username)}</td>
             <td>${escapeHtml(user.email)}</td>
             <td>${escapeHtml(user.role || "USER")}</td>
-            <td>
-                <div class="row-actions ${canDeleteUser(user) ? "" : "hidden"}">
-                    <button class="danger-button" type="button" data-action="delete-user" data-id="${user.id}">Sil</button>
-                </div>
-            </td>
+            ${actionCell(user)}
         </tr>
     `).join("");
 
@@ -349,9 +533,18 @@ function renderUsers() {
 
 function renderDevices() {
     if (state.devices.length === 0) {
-        renderEmpty(elements.devicesTable, 6, "Kayitli cihaz yok");
+        renderEmpty(elements.devicesTable, isAdmin() ? 6 : 5, "Kayitli cihaz yok");
         return;
     }
+
+    const actionCell = (device) => isAdmin() ? `
+            <td class="admin-action-col">
+                <div class="row-actions">
+                    <button class="small-button" type="button" data-action="edit-device" data-id="${device.id}">Duzenle</button>
+                    <button class="danger-button" type="button" data-action="delete-device" data-id="${device.id}">Sil</button>
+                </div>
+            </td>
+    ` : "";
 
     elements.devicesTable.innerHTML = state.devices.map((device) => `
         <tr>
@@ -360,12 +553,7 @@ function renderDevices() {
             <td>${escapeHtml(device.deviceType)}</td>
             <td>${statusBadge(device.status)}</td>
             <td>${escapeHtml(device.location || "-")}</td>
-            <td>
-                <div class="row-actions ${isAdmin() ? "" : "hidden"}">
-                    <button class="small-button" type="button" data-action="edit-device" data-id="${device.id}">Duzenle</button>
-                    <button class="danger-button" type="button" data-action="delete-device" data-id="${device.id}">Sil</button>
-                </div>
-            </td>
+            ${actionCell(device)}
         </tr>
     `).join("");
 
@@ -381,27 +569,31 @@ function renderDevices() {
 async function renderUserDevices() {
     const userId = state.selectedUserId;
     if (!userId) {
-        renderEmpty(elements.userDevicesTable, 4, "Once kullanici ekleyin");
+        renderEmpty(elements.userDevicesTable, isAdmin() ? 4 : 3, "Once kullanici ekleyin");
         return;
     }
 
     try {
         const devices = await request(`/api/users/${userId}/devices`);
         if (devices.length === 0) {
-            renderEmpty(elements.userDevicesTable, 4, "Bu kullaniciya atanmis cihaz yok");
+            renderEmpty(elements.userDevicesTable, isAdmin() ? 4 : 3, "Bu kullaniciya atanmis cihaz yok");
             return;
         }
+
+        const actionCell = (device) => isAdmin() ? `
+                <td class="admin-action-col">
+                    <div class="row-actions">
+                        <button class="danger-button" type="button" data-action="detach-device" data-id="${device.id}">Kaldir</button>
+                    </div>
+                </td>
+        ` : "";
 
         elements.userDevicesTable.innerHTML = devices.map((device) => `
             <tr>
                 <td>${escapeHtml(device.id)}</td>
                 <td>${escapeHtml(device.name)}</td>
                 <td>${statusBadge(device.status)}</td>
-                <td>
-                    <div class="row-actions ${isAdmin() ? "" : "hidden"}">
-                        <button class="danger-button" type="button" data-action="detach-device" data-id="${device.id}">Kaldir</button>
-                    </div>
-                </td>
+                ${actionCell(device)}
             </tr>
         `).join("");
 
@@ -409,7 +601,7 @@ async function renderUserDevices() {
             button.addEventListener("click", () => detachDevice(userId, button.dataset.id));
         });
     } catch (error) {
-        renderEmpty(elements.userDevicesTable, 4, error.message);
+        renderEmpty(elements.userDevicesTable, isAdmin() ? 4 : 3, error.message);
     }
 }
 
